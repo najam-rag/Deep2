@@ -94,6 +94,7 @@ st.title("⚡ Clause-Smart Code Assistant")
 # === Upload Mode Selection ===
 input_method = st.sidebar.radio("📤 Select Input Type", ["Upload PDF", "Use Pre-chunked File"])
 chunks = None
+qa = None
 
 if input_method == "Upload PDF":
     uploaded_file = st.file_uploader("📎 Upload a PDF Code", type="pdf")
@@ -123,6 +124,8 @@ if input_method == "Upload PDF":
             db = FAISS.from_documents(chunks, embeddings)
             db.save_local(vectorstore_dir)
             retriever = db.as_retriever()
+
+        if retriever:
             llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
             qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
@@ -141,25 +144,32 @@ elif input_method == "Use Pre-chunked File":
         embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
         db = FAISS.from_documents(chunks, embeddings)
         retriever = db.as_retriever()
-        llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
-        qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
-if not chunks and not input_method == "Use Pre-chunked File":
-    st.info("Please upload a document")
+        if retriever:
+            llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
+            qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+
+# === Early Exit if Input Missing ===
+if chunks is None and input_method != "Use Pre-chunked File":
+    st.info("📥 Please upload a document to get started.")
     st.stop()
 
+# === Question & Answer UI ===
 query = st.text_input("💬 Ask your question:")
 if query:
-    result = qa({"query": query})
+    if qa:
+        result = qa({"query": query})
 
-    st.subheader("🔍 Answer")
-    st.success(result["result"])
+        st.subheader("🔍 Answer")
+        st.success(result["result"])
 
-    st.subheader("📚 Source Snippets")
-    for i, doc in enumerate(result["source_documents"][:3]):
-        page = doc.metadata.get("page", "N/A")
-        preview = doc.page_content.strip().replace("\n", " ")[:500]
-        clause_info = extract_clause(preview)
+        st.subheader("📚 Source Snippets")
+        for i, doc in enumerate(result["source_documents"][:3]):
+            page = doc.metadata.get("page", "N/A")
+            preview = doc.page_content.strip().replace("\n", " ")[:500]
+            clause_info = extract_clause(preview)
 
-        with st.expander(f"Source {i+1} — Page {page}, {clause_info}"):
-            st.code(preview, language="text")
+            with st.expander(f"Source {i+1} — Page {page}, {clause_info}"):
+                st.code(preview, language="text")
+    else:
+        st.warning("⚠️ No valid retriever found. Please ensure a valid file is uploaded.")
