@@ -1,0 +1,12 @@
+streamlit
+langchain-openai
+langchain-community
+openai
+pypdf
+pdf2image
+pytesseract
+faiss-cpu
+tqdm
+PyPDF2
+rank_bm25
+pdfminer.six==20221105
