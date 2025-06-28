@@ -93,7 +93,7 @@ st.title("⚡ Clause-Smart Code Assistant")
 # === Code Selection Dropdown ===
 code_option = st.sidebar.selectbox("📘 Select Code Standard", ["AS3000", "AS3017", "AS3003"])
 code_to_jsonl = {
-    "AS3000": "https://raw.githubusercontent.com/YOUR_REPO/as3000_chunks_by_clause.jsonl",
+    "AS3000": "https://github.com/najam-rag/Deep2/blob/main/as3000_chunks_by_clause.jsonl",
     "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/as3017_chunks.jsonl",
     "AS3003": "https://raw.githubusercontent.com/YOUR_REPO/as3003_chunks.jsonl",
 }
