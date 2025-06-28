@@ -1,40 +1,49 @@
+# Unified Ultra-RAG App with Clause Extraction
 import streamlit as st
 import os
 import hashlib
 import tempfile
 import re
-from typing import List, Optional
+from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
-# Document Processing
-from PyPDF2 import PdfReader, PdfWriter
+from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 import pytesseract
+
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 
-# Vectorstores and Retrieval
 from langchain_community.vectorstores import FAISS
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.retrievers import BM25Retriever
 
-# LLM Components
 from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
 
-# Configuration
-st.set_page_config(page_title="⚡ Ultra-RAG Assistant", layout="wide")
+# === Configuration ===
+st.set_page_config(page_title="⚡ Clause Finder RAG App", layout="wide")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-
-# Constants
-MAX_FILE_SIZE_MB = 200
-MAX_PAGES_TO_PROCESS = 100
-OCR_THREADS = 4
 EMBEDDING_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4-turbo-preview"
+OCR_THREADS = 4
 
+# === Clause Extractor ===
+def extract_clause(text: str) -> str:
+    patterns = [
+        r"(Clause\s*\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)",
+        r"(\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)",
+        r"(Clause\s*\d{1,2}\.\d{1,2}[a-zA-Z]?)",
+        r"(Clause\s*\d{1,2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return "Clause not found"
+
+# === Document Processor ===
 class DocumentProcessor:
     def __init__(self):
         self.ocr_fallback = False
@@ -49,200 +58,93 @@ class DocumentProcessor:
             try:
                 loader = PyPDFLoader(file_path)
                 docs = loader.load()
-                if self._validate_docs(docs):
-                    self.processed_pages = len(docs)
-                    return self._enhance_metadata(docs)
-            except Exception as e:
-                st.warning(f"Structured extraction failed: {str(e)}")
+                if self._validate(docs):
+                    return docs
+            except: pass
 
             try:
                 loader = UnstructuredPDFLoader(file_path, mode="elements", strategy="fast")
                 docs = loader.load()
-                if self._validate_docs(docs):
-                    self.processed_pages = len(docs)
-                    return self._enhance_metadata(docs)
-            except Exception as e:
-                st.warning(f"Unstructured extraction failed: {str(e)}")
+                if self._validate(docs):
+                    return docs
+            except: pass
 
             self.ocr_fallback = True
             images = convert_from_path(file_path, thread_count=OCR_THREADS)
             texts = self._parallel_ocr(images)
-            docs = [
-                Document(page_content=t, metadata={"page": i+1, "source": "OCR"})
-                for i, t in enumerate(texts) if t.strip()
-            ]
-            self.processed_pages = len(docs)
-            return self._enhance_metadata(docs)
+            return [Document(page_content=t, metadata={"page": i+1}) for i, t in enumerate(texts) if t.strip()]
 
         except Exception as e:
-            st.error(f"❌ Critical processing error: {str(e)}")
+            st.error(f"❌ Processing failed: {str(e)}")
             st.stop()
 
-    def _validate_docs(self, docs: List[Document]) -> bool:
+    def _validate(self, docs):
         return bool(docs) and any(len(doc.page_content.strip()) > 50 for doc in docs)
 
-    def _enhance_metadata(self, docs: List[Document]) -> List[Document]:
-        for doc in docs:
-            if clause_match := re.search(r"(?i)(clause|section|part)\\s*(\\d+(?:\\.\\d+)*)", doc.page_content):
-                doc.metadata["clause"] = f"{clause_match.group(1)} {clause_match.group(2)}"
-            if any(x in doc.page_content[:200].lower() for x in ["table", "figure", "diagram"]):
-                doc.metadata["content_type"] = "visual"
-        return docs
+# === VectorStore with Cache ===
+@st.cache_resource
+def load_vectorstore_with_cache(pdf_bytes: bytes):
+    pdf_hash = hashlib.md5(pdf_bytes).hexdigest()
+    vectorstore_dir = f"vectorstores/{pdf_hash}"
 
-class VectorStoreManager:
-    def __init__(self):
-        self.embeddings = OpenAIEmbeddings(
-            openai_api_key=OPENAI_API_KEY,
-            model=EMBEDDING_MODEL,
-            chunk_size=500
-        )
-        self.vectorstore = None
-        self.bm25_retriever = None
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+    retriever = None
 
-    def initialize_from_documents(self, chunks: List[Document]):
+    if os.path.exists(vectorstore_dir):
         try:
-            self.vectorstore = FAISS.from_documents(
-                documents=chunks[:200],
-                embedding=self.embeddings
-            )
-            self.bm25_retriever = BM25Retriever.from_documents(chunks)
-            self.bm25_retriever.k = 5
-            return True
-        except Exception as e:
-            st.error(f"Vector store initialization failed: {str(e)}")
-            return False
+            retriever = FAISS.load_local(vectorstore_dir, embeddings).as_retriever()
+        except:
+            os.system(f"rm -rf {vectorstore_dir}")
 
-    def query(self, question: str) -> List[Document]:
-        if not self.vectorstore:
-            return self.bm25_retriever.invoke(question)
-        try:
-            if re.search(r"(?i)(clause|section|table)\\s*[\\d\\.]+", question):
-                return self.bm25_retriever.invoke(question)
-            vector_results = self.vectorstore.similarity_search(question, k=5)
-            keyword_results = self.bm25_retriever.invoke(question)
-            combined = {
-                doc.metadata.get("page", ""): doc
-                for doc in vector_results + keyword_results
-            }
-            return list(combined.values())[:5]
-        except Exception:
-            return self.bm25_retriever.invoke(question)
+    if retriever is None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
 
-def extract_clause(text: str) -> str:
-    patterns = [
-        r"(Clause\\s*\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)",
-        r"(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)",
-        r"(Clause\\s*\\d{1,2}\\.\\d{1,2}[a-zA-Z]?)",
-        r"(Clause\\s*\\d{1,2})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
-    return "Clause not found"
+        processor = DocumentProcessor()
+        docs = processor.process(tmp_path)
 
-def main():
-    if "authenticated" not in st.session_state:
-        st.sidebar.header("🔐 Secure Login")
-        password = st.sidebar.text_input("Enter access code", type="password")
-        if password == st.secrets.get("APP_PASSWORD", "default_pass"):
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.warning("Access denied")
-            st.stop()
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = splitter.split_documents(docs)
 
-    st.title("⚡ Ultra-RAG Assistant")
-    st.markdown("""
-    **Advanced document analysis with hybrid retrieval**  
-    *Upload technical documents for AI-powered Q&A*
-    """)
+        db = FAISS.from_documents(chunks, embeddings)
+        db.save_local(vectorstore_dir)
+        retriever = db.as_retriever()
 
-    uploaded_file = st.file_uploader(
-        "📎 Upload document (PDF, max 200MB)",
-        type="pdf",
-        accept_multiple_files=False
-    )
+    return retriever
 
-    if not uploaded_file:
-        st.info("Please upload a document to begin")
-        st.stop()
+# === UI ===
+st.sidebar.header("🔐 Login")
+password = st.sidebar.text_input("Enter password", type="password")
+if password != "Password":
+    st.warning("🚫 Access denied")
+    st.stop()
 
-    if uploaded_file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        st.error(f"File exceeds maximum size of {MAX_FILE_SIZE_MB}MB")
-        st.stop()
+st.title("⚡ Clause-Smart Code Assistant")
+uploaded_file = st.file_uploader("📎 Upload a PDF Code", type="pdf")
 
-    if "vectorstore" not in st.session_state:
-        with st.spinner("🚀 Initializing document processing..."):
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                    tmp_file.write(uploaded_file.read())
-                    temp_path = tmp_file.name
+if not uploaded_file:
+    st.info("Please upload a PDF")
+    st.stop()
 
-                processor = DocumentProcessor()
-                docs = processor.process(temp_path)
+pdf_bytes = uploaded_file.read()
+retriever = load_vectorstore_with_cache(pdf_bytes)
 
-                splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=1000,
-                    chunk_overlap=200,
-                    separators=["\n\n", "\nClause", "\nSection", "(?<=\\. )"]
-                )
-                chunks = splitter.split_documents(docs)
+llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
+qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
-                vs_manager = VectorStoreManager()
-                if not vs_manager.initialize_from_documents(chunks):
-                    st.stop()
+query = st.text_input("💬 Ask your question:")
+if query:
+    result = qa({"query": query})
 
-                st.session_state.vectorstore = vs_manager.vectorstore.as_retriever()
+    st.subheader("🔍 Answer")
+    st.success(result["result"])
 
-                st.success(f"""
-                ✅ Document loaded successfully  
-                Pages processed: {processor.processed_pages}  
-                Content type: {'OCR' if processor.ocr_fallback else 'Native text'}
-                """)
+    st.subheader("📚 Source Snippets")
+    for i, doc in enumerate(result["source_documents"][:3]):
+        page = doc.metadata.get("page", "N/A")
+        preview = doc.page_content.strip().replace("\n", " ")[:500]
+        clause_info = extract_clause(preview)
 
-            finally:
-                if 'temp_path' in locals():
-                    try:
-                        os.unlink(temp_path)
-                    except:
-                        pass
-
-    query = st.text_input("💬 Ask about the document:")
-    if query:
-        with st.spinner("🔍 Retrieving information..."):
-            try:
-                llm = ChatOpenAI(
-                    model=LLM_MODEL,
-                    temperature=0.2,
-                    openai_api_key=OPENAI_API_KEY,
-                    max_tokens=2000
-                )
-
-                qa = RetrievalQA.from_chain_type(
-                    llm=llm,
-                    retriever=st.session_state.vectorstore,
-                    chain_type="stuff",
-                    return_source_documents=True
-                )
-
-                result = qa.invoke({"query": query})
-
-                st.subheader("🔍 Answer")
-                st.markdown(result["result"])
-
-                st.subheader("📌 Key Sources")
-                for i, doc in enumerate(result["source_documents"][:3]):
-                    page = doc.metadata.get("page", "N/A")
-                    preview = doc.page_content.strip().replace("\n", " ")[:500]
-                    clause_info = extract_clause(preview)
-
-                    with st.expander(f"Source {i+1} — Page {page}, {clause_info}"):
-                        st.caption(f"Relevance Score: {doc.metadata.get('score', 0):.2f}")
-                        st.code(preview, language="text")
-
-            except Exception as e:
-                st.error(f"Query failed: {str(e)}")
-
-if __name__ == "__main__":
-    main()
+        with st.expander(f"Source {i+1} — Page {page}, {clause_info}"):
+            st.code(preview, language="text")
