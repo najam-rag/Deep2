@@ -1,4 +1,4 @@
-# ✅ Unified Ultra-RAG App with Clause Extraction and Optional JSONL Input (Fixed Version)
+# ✅ Unified Ultra-RAG App with Clause Extraction and Optional JSONL Input (Final Fixed Version)
 import streamlit as st
 import os
 import hashlib
@@ -18,8 +18,6 @@ from langchain.schema import Document
 
 from langchain_community.vectorstores import FAISS
 from langchain.embeddings import OpenAIEmbeddings
-from langchain.retrievers import BM25Retriever
-
 from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQA
 
@@ -48,7 +46,6 @@ def extract_clause(text: str) -> str:
 class DocumentProcessor:
     def __init__(self):
         self.ocr_fallback = False
-        self.processed_pages = 0
 
     def _parallel_ocr(self, images: List) -> List[str]:
         with ThreadPoolExecutor(max_workers=OCR_THREADS) as executor:
@@ -61,19 +58,21 @@ class DocumentProcessor:
                 docs = loader.load()
                 if self._validate(docs):
                     return docs
-            except: pass
+            except:
+                pass
 
             try:
                 loader = UnstructuredPDFLoader(file_path, mode="elements", strategy="fast")
                 docs = loader.load()
                 if self._validate(docs):
                     return docs
-            except: pass
+            except:
+                pass
 
             self.ocr_fallback = True
             images = convert_from_path(file_path, thread_count=OCR_THREADS)
             texts = self._parallel_ocr(images)
-            return [Document(page_content=t, metadata={"page": i+1}) for i, t in enumerate(texts) if t.strip()]
+            return [Document(page_content=t, metadata={"page": i + 1}) for i, t in enumerate(texts) if t.strip()]
 
         except Exception as e:
             st.error(f"❌ Processing failed: {str(e)}")
@@ -86,7 +85,7 @@ class DocumentProcessor:
 st.sidebar.header("🔐 Login")
 password = st.sidebar.text_input("Enter password", type="password", key="login_password")
 if password != "Password":
-    st.warning("🛛 Access denied")
+    st.warning("🛑 Access denied")
     st.stop()
 
 st.title("⚡ Clause-Smart Code Assistant")
@@ -137,18 +136,12 @@ elif input_method == "Use Pre-chunked File":
             obj = json.loads(line)
             doc = Document(
                 page_content=obj["content"],
-                metadata={
-                    "clause": obj.get("metadata", {}).get("clause", "N/A"),
-                    "page": obj.get("metadata", {}).get("page", "N/A")
-                }
+                metadata=obj.get("metadata", {})
             )
             docs.append(doc)
 
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        chunks = splitter.split_documents(docs)
-
         embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-        db = FAISS.from_documents(chunks, embeddings)
+        db = FAISS.from_documents(docs, embeddings)
         retriever = db.as_retriever()
 
         if retriever:
@@ -156,26 +149,23 @@ elif input_method == "Use Pre-chunked File":
             qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
 # === Early Exit if Input Missing ===
-if chunks is None and input_method != "Use Pre-chunked File":
-    st.info("📅 Please upload a document to get started.")
+if qa is None:
+    st.info("📥 Please upload a document or JSONL file to begin.")
     st.stop()
 
-# === Question & Answer UI ===
+# === Q&A Interface ===
 query = st.text_input("💬 Ask your question:", key="user_query")
 if query:
-    if qa:
-        result = qa({"query": query})
+    result = qa({"query": query})
 
-        st.subheader("🔍 Answer")
-        st.success(result["result"])
+    st.subheader("🔍 Answer")
+    st.success(result["result"])
 
-        st.subheader("📚 Source Snippets")
-        for i, doc in enumerate(result["source_documents"][:3]):
-            page = doc.metadata.get("page", "N/A")
-            clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
-            preview = doc.page_content.strip().replace("\n", " ")[:500]
+    st.subheader("📚 Source Snippets")
+    for i, doc in enumerate(result["source_documents"][:3]):
+        page = doc.metadata.get("page", "N/A")
+        clause = doc.metadata.get("clause", extract_clause(doc.page_content))
+        preview = doc.page_content.strip().replace("\n", " ")[:500]
 
-            with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page}"):
-                st.code(preview, language="text")
-    else:
-        st.warning("⚠️ No valid retriever found. Please ensure a valid file is uploaded.")
+        with st.expander(f"Source {i+1} — Clause {clause}, Page {page}"):
+            st.code(preview, language="text")
