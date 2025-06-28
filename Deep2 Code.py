@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with Dropdown-Linked JSONL and User PDF Upload
+# ✅ Smart RAG App with Weighted JSONL and PDF Support
 import streamlit as st
 import os
 import hashlib
@@ -21,7 +21,8 @@ from langchain_community.vectorstores import FAISS
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.retrievers import BM25Retriever
 from langchain_openai import ChatOpenAI
-from langchain.chains import RetrievalQA
+from langchain.chains import RetrievalQAWithSourcesChain
+from langchain.vectorstores.utils import DistanceStrategy
 
 # === Configuration ===
 st.set_page_config(page_title="⚡ Clause Finder RAG App", layout="wide")
@@ -110,7 +111,7 @@ if jsonl_response.status_code != 200:
     st.error("❌ Failed to fetch standard chunks from GitHub.")
     st.stop()
 
-chunks = []
+jsonl_chunks = []
 for line in jsonl_response.text.strip().splitlines():
     line = line.strip()
     if not line:
@@ -121,44 +122,50 @@ for line in jsonl_response.text.strip().splitlines():
             page_content=obj["content"],
             metadata={
                 "clause": obj.get("metadata", {}).get("clause", "N/A"),
-                "page": obj.get("metadata", {}).get("page", "N/A")
+                "page": obj.get("metadata", {}).get("page", "N/A"),
+                "source": "JSONL"
             }
         )
-        chunks.append(doc)
+        jsonl_chunks.append(doc)
     except json.JSONDecodeError:
         st.warning("⚠️ Skipping malformed JSONL line.")
 
-# === Process Uploaded PDF for Support Content ===
+# === Process Uploaded PDF ===
 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
     tmp.write(uploaded_file.read())
     tmp_path = tmp.name
 
 processor = DocumentProcessor()
-user_docs = processor.process(tmp_path)
+pdf_docs = processor.process(tmp_path)
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-combined_chunks = splitter.split_documents(chunks + user_docs)
+jsonl_split = splitter.split_documents(jsonl_chunks)
+pdf_split = splitter.split_documents(pdf_docs)
+
+# === Combine with Weight: JSONL gets more weight via duplication ===
+weighted_chunks = jsonl_split * 3 + pdf_split  # Weight: JSONL 3x stronger
 
 # === Embeddings & QA ===
 embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-db = FAISS.from_documents(combined_chunks, embeddings)
+db = FAISS.from_documents(weighted_chunks, embeddings)
 retriever = db.as_retriever()
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
-qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
 # === Question Input ===
 query = st.text_input("💬 Ask your question:")
 if query:
-    result = qa({"query": query})
+    result = qa({"question": query})
 
     st.subheader("🔍 Answer")
-    st.success(result["result"])
+    st.success(result["answer"])
 
     st.subheader("📚 Source Snippets")
     for i, doc in enumerate(result["source_documents"][:3]):
         page = doc.metadata.get("page", "N/A")
         clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
+        source = doc.metadata.get("source", "uploaded PDF")
         preview = doc.page_content.strip().replace("\n", " ")[:500]
 
-        with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page}"):
+        with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page} ({source})"):
             st.code(preview, language="text")
