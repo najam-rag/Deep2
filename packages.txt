@@ -1,0 +1,7 @@
+libgl1
+python3-dev
+build-essential
+poppler-utils
+tesseract-ocr
+libtesseract-dev
+
