@@ -1,9 +1,10 @@
-# Unified Ultra-RAG App with Clause Extraction
+# Unified Ultra-RAG App with Clause Extraction and Optional JSONL Input
 import streamlit as st
 import os
 import hashlib
 import tempfile
 import re
+import json
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
@@ -81,38 +82,6 @@ class DocumentProcessor:
     def _validate(self, docs):
         return bool(docs) and any(len(doc.page_content.strip()) > 50 for doc in docs)
 
-# === VectorStore with Cache ===
-@st.cache_resource
-def load_vectorstore_with_cache(pdf_bytes: bytes):
-    pdf_hash = hashlib.md5(pdf_bytes).hexdigest()
-    vectorstore_dir = f"vectorstores/{pdf_hash}"
-
-    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-    retriever = None
-
-    if os.path.exists(vectorstore_dir):
-        try:
-            retriever = FAISS.load_local(vectorstore_dir, embeddings).as_retriever()
-        except:
-            os.system(f"rm -rf {vectorstore_dir}")
-
-    if retriever is None:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(pdf_bytes)
-            tmp_path = tmp.name
-
-        processor = DocumentProcessor()
-        docs = processor.process(tmp_path)
-
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        chunks = splitter.split_documents(docs)
-
-        db = FAISS.from_documents(chunks, embeddings)
-        db.save_local(vectorstore_dir)
-        retriever = db.as_retriever()
-
-    return retriever
-
 # === UI ===
 st.sidebar.header("🔐 Login")
 password = st.sidebar.text_input("Enter password", type="password")
@@ -121,14 +90,59 @@ if password != "Password":
     st.stop()
 
 st.title("⚡ Clause-Smart Code Assistant")
-uploaded_file = st.file_uploader("📎 Upload a PDF Code", type="pdf")
 
-if not uploaded_file:
-    st.info("Please upload a PDF")
+# === Upload Mode Selection ===
+input_method = st.sidebar.radio("📤 Select Input Type", ["Upload PDF", "Use Pre-chunked File"])
+chunks = None
+
+if input_method == "Upload PDF":
+    uploaded_file = st.file_uploader("📎 Upload a PDF Code", type="pdf")
+    if uploaded_file:
+        pdf_bytes = uploaded_file.read()
+        pdf_hash = hashlib.md5(pdf_bytes).hexdigest()
+        vectorstore_dir = f"vectorstores/{pdf_hash}"
+
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+
+        if os.path.exists(vectorstore_dir):
+            try:
+                retriever = FAISS.load_local(vectorstore_dir, embeddings).as_retriever()
+            except:
+                os.system(f"rm -rf {vectorstore_dir}")
+                retriever = None
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(pdf_bytes)
+                tmp_path = tmp.name
+
+            processor = DocumentProcessor()
+            docs = processor.process(tmp_path)
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            chunks = splitter.split_documents(docs)
+
+            db = FAISS.from_documents(chunks, embeddings)
+            db.save_local(vectorstore_dir)
+            retriever = db.as_retriever()
+
+elif input_method == "Use Pre-chunked File":
+    jsonl_file = st.file_uploader("📂 Upload your JSONL chunk file", type="jsonl")
+    if jsonl_file:
+        docs = []
+        for line in jsonl_file:
+            obj = json.loads(line)
+            doc = Document(page_content=obj["content"], metadata=obj.get("metadata", {}))
+            docs.append(doc)
+
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = splitter.split_documents(docs)
+
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+        db = FAISS.from_documents(chunks, embeddings)
+        retriever = db.as_retriever()
+
+if not chunks and not input_method == "Use Pre-chunked File":
+    st.info("Please upload a document")
     st.stop()
-
-pdf_bytes = uploaded_file.read()
-retriever = load_vectorstore_with_cache(pdf_bytes)
 
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
 qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
