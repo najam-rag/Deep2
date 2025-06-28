@@ -1,4 +1,4 @@
-# ✅ Unified Ultra-RAG App with Clause Extraction and Optional JSONL Input (Final Fixed Version)
+# ✅ Smart RAG App with Dropdown-Linked JSONL and User PDF Upload
 import streamlit as st
 import os
 import hashlib
@@ -18,6 +18,8 @@ from langchain.schema import Document
 
 from langchain_community.vectorstores import FAISS
 from langchain.embeddings import OpenAIEmbeddings
+from langchain.retrievers import BM25Retriever
+
 from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQA
 
@@ -58,21 +60,19 @@ class DocumentProcessor:
                 docs = loader.load()
                 if self._validate(docs):
                     return docs
-            except:
-                pass
+            except: pass
 
             try:
                 loader = UnstructuredPDFLoader(file_path, mode="elements", strategy="fast")
                 docs = loader.load()
                 if self._validate(docs):
                     return docs
-            except:
-                pass
+            except: pass
 
             self.ocr_fallback = True
             images = convert_from_path(file_path, thread_count=OCR_THREADS)
             texts = self._parallel_ocr(images)
-            return [Document(page_content=t, metadata={"page": i + 1}) for i, t in enumerate(texts) if t.strip()]
+            return [Document(page_content=t, metadata={"page": i+1}) for i, t in enumerate(texts) if t.strip()]
 
         except Exception as e:
             st.error(f"❌ Processing failed: {str(e)}")
@@ -81,80 +81,69 @@ class DocumentProcessor:
     def _validate(self, docs):
         return bool(docs) and any(len(doc.page_content.strip()) > 50 for doc in docs)
 
-# === UI ===
+# === UI Login ===
 st.sidebar.header("🔐 Login")
-password = st.sidebar.text_input("Enter password", type="password", key="login_password")
+password = st.sidebar.text_input("Enter password", type="password")
 if password != "Password":
-    st.warning("🛑 Access denied")
+    st.warning("🚫 Access denied")
     st.stop()
 
 st.title("⚡ Clause-Smart Code Assistant")
 
-# === Upload Mode Selection ===
-input_method = st.sidebar.radio("📄 Select Input Type", ["Upload PDF", "Use Pre-chunked File"])
-chunks = None
-qa = None
+# === Code Selection Dropdown ===
+code_option = st.sidebar.selectbox("📘 Select Code Standard", ["AS3000", "AS3017", "AS3003"])
+code_to_jsonl = {
+    "AS3000": "https://raw.githubusercontent.com/YOUR_REPO/as3000_chunks_by_clause.jsonl",
+    "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/as3017_chunks.jsonl",
+    "AS3003": "https://raw.githubusercontent.com/YOUR_REPO/as3003_chunks.jsonl",
+}
+selected_jsonl_url = code_to_jsonl.get(code_option)
 
-if input_method == "Upload PDF":
-    uploaded_file = st.file_uploader("📌 Upload a PDF Code", type="pdf")
-    if uploaded_file:
-        pdf_bytes = uploaded_file.read()
-        pdf_hash = hashlib.md5(pdf_bytes).hexdigest()
-        vectorstore_dir = f"vectorstores/{pdf_hash}"
-
-        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-
-        if os.path.exists(vectorstore_dir):
-            try:
-                retriever = FAISS.load_local(vectorstore_dir, embeddings).as_retriever()
-            except:
-                os.system(f"rm -rf {vectorstore_dir}")
-                retriever = None
-        else:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(pdf_bytes)
-                tmp_path = tmp.name
-
-            processor = DocumentProcessor()
-            docs = processor.process(tmp_path)
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            chunks = splitter.split_documents(docs)
-
-            db = FAISS.from_documents(chunks, embeddings)
-            db.save_local(vectorstore_dir)
-            retriever = db.as_retriever()
-
-        if retriever:
-            llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
-            qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
-
-elif input_method == "Use Pre-chunked File":
-    jsonl_file = st.file_uploader("📂 Upload your JSONL chunk file", type="jsonl")
-    if jsonl_file:
-        docs = []
-        for line in jsonl_file:
-            obj = json.loads(line)
-            doc = Document(
-                page_content=obj["content"],
-                metadata=obj.get("metadata", {})
-            )
-            docs.append(doc)
-
-        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-        db = FAISS.from_documents(docs, embeddings)
-        retriever = db.as_retriever()
-
-        if retriever:
-            llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
-            qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
-
-# === Early Exit if Input Missing ===
-if qa is None:
-    st.info("📥 Please upload a document or JSONL file to begin.")
+# === PDF Upload ===
+uploaded_file = st.file_uploader("📌 Upload Your Code PDF", type="pdf")
+if not uploaded_file:
+    st.info("📎 Please upload a code PDF to begin.")
     st.stop()
 
-# === Q&A Interface ===
-query = st.text_input("💬 Ask your question:", key="user_query")
+# === Load JSONL from GitHub URL ===
+import requests
+jsonl_response = requests.get(selected_jsonl_url)
+if jsonl_response.status_code != 200:
+    st.error("Failed to fetch standard chunks from GitHub.")
+    st.stop()
+
+chunks = []
+for line in jsonl_response.text.strip().splitlines():
+    obj = json.loads(line)
+    doc = Document(
+        page_content=obj["content"],
+        metadata={
+            "clause": obj.get("metadata", {}).get("clause", "N/A"),
+            "page": obj.get("metadata", {}).get("page", "N/A")
+        }
+    )
+    chunks.append(doc)
+
+# === Process Uploaded PDF for Support Content ===
+with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+    tmp.write(uploaded_file.read())
+    tmp_path = tmp.name
+
+processor = DocumentProcessor()
+user_docs = processor.process(tmp_path)
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+combined_chunks = splitter.split_documents(chunks + user_docs)
+
+# === Embeddings & QA ===
+embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+db = FAISS.from_documents(combined_chunks, embeddings)
+retriever = db.as_retriever()
+llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
+qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+
+# === Question Input ===
+query = st.text_input("💬 Ask your question:")
 if query:
     result = qa({"query": query})
 
@@ -164,8 +153,8 @@ if query:
     st.subheader("📚 Source Snippets")
     for i, doc in enumerate(result["source_documents"][:3]):
         page = doc.metadata.get("page", "N/A")
-        clause = doc.metadata.get("clause", extract_clause(doc.page_content))
+        clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
         preview = doc.page_content.strip().replace("\n", " ")[:500]
 
-        with st.expander(f"Source {i+1} — Clause {clause}, Page {page}"):
+        with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page}"):
             st.code(preview, language="text")
