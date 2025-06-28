@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 import pytesseract
+import requests
 
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -19,7 +20,6 @@ from langchain.schema import Document
 from langchain_community.vectorstores import FAISS
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.retrievers import BM25Retriever
-
 from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQA
 
@@ -73,7 +73,6 @@ class DocumentProcessor:
             images = convert_from_path(file_path, thread_count=OCR_THREADS)
             texts = self._parallel_ocr(images)
             return [Document(page_content=t, metadata={"page": i+1}) for i, t in enumerate(texts) if t.strip()]
-
         except Exception as e:
             st.error(f"❌ Processing failed: {str(e)}")
             st.stop()
@@ -93,9 +92,9 @@ st.title("⚡ Clause-Smart Code Assistant")
 # === Code Selection Dropdown ===
 code_option = st.sidebar.selectbox("📘 Select Code Standard", ["AS3000", "AS3017", "AS3003"])
 code_to_jsonl = {
-    "AS3000": "https://github.com/najam-rag/Deep2/blob/main/as3000_chunks_by_clause.jsonl",
-    "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/as3017_chunks.jsonl",
-    "AS3003": "https://raw.githubusercontent.com/YOUR_REPO/as3003_chunks.jsonl",
+    "AS3000": "https://raw.githubusercontent.com/najam-rag/Deep2/main/as3000_chunks_by_clause.jsonl",
+    "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/main/as3017_chunks.jsonl",
+    "AS3003": "https://raw.githubusercontent.com/YOUR_REPO/main/as3003_chunks.jsonl",
 }
 selected_jsonl_url = code_to_jsonl.get(code_option)
 
@@ -105,24 +104,29 @@ if not uploaded_file:
     st.info("📎 Please upload a code PDF to begin.")
     st.stop()
 
-# === Load JSONL from GitHub URL ===
-import requests
+# === Load JSONL from GitHub (SAFE)
 jsonl_response = requests.get(selected_jsonl_url)
 if jsonl_response.status_code != 200:
-    st.error("Failed to fetch standard chunks from GitHub.")
+    st.error("❌ Failed to fetch standard chunks from GitHub.")
     st.stop()
 
 chunks = []
 for line in jsonl_response.text.strip().splitlines():
-    obj = json.loads(line)
-    doc = Document(
-        page_content=obj["content"],
-        metadata={
-            "clause": obj.get("metadata", {}).get("clause", "N/A"),
-            "page": obj.get("metadata", {}).get("page", "N/A")
-        }
-    )
-    chunks.append(doc)
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+        doc = Document(
+            page_content=obj["content"],
+            metadata={
+                "clause": obj.get("metadata", {}).get("clause", "N/A"),
+                "page": obj.get("metadata", {}).get("page", "N/A")
+            }
+        )
+        chunks.append(doc)
+    except json.JSONDecodeError:
+        st.warning("⚠️ Skipping malformed JSONL line.")
 
 # === Process Uploaded PDF for Support Content ===
 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
