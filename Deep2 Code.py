@@ -35,24 +35,16 @@ OCR_THREADS = 4
 EMBEDDING_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4-turbo-preview"
 
-# ======================
-# Core Processing Classes
-# ======================
-
 class DocumentProcessor:
-    """Optimized PDF processor with parallel OCR"""
-
     def __init__(self):
         self.ocr_fallback = False
         self.processed_pages = 0
 
     def _parallel_ocr(self, images: List) -> List[str]:
-        """Process images in parallel"""
         with ThreadPoolExecutor(max_workers=OCR_THREADS) as executor:
             return list(executor.map(pytesseract.image_to_string, images))
 
     def process(self, file_path: str) -> List[Document]:
-        """Process PDF with automatic fallback to OCR"""
         try:
             try:
                 loader = PyPDFLoader(file_path)
@@ -91,7 +83,7 @@ class DocumentProcessor:
 
     def _enhance_metadata(self, docs: List[Document]) -> List[Document]:
         for doc in docs:
-            if clause_match := re.search(r"(?i)(clause|section|part)\s*(\d+(?:\.\d+)*)", doc.page_content):
+            if clause_match := re.search(r"(?i)(clause|section|part)\\s*(\\d+(?:\\.\\d+)*)", doc.page_content):
                 doc.metadata["clause"] = f"{clause_match.group(1)} {clause_match.group(2)}"
             if any(x in doc.page_content[:200].lower() for x in ["table", "figure", "diagram"]):
                 doc.metadata["content_type"] = "visual"
@@ -124,7 +116,7 @@ class VectorStoreManager:
         if not self.vectorstore:
             return self.bm25_retriever.invoke(question)
         try:
-            if re.search(r"(?i)(clause|section|table)\s*[\d\.]+", question):
+            if re.search(r"(?i)(clause|section|table)\\s*[\\d\\.]+", question):
                 return self.bm25_retriever.invoke(question)
             vector_results = self.vectorstore.similarity_search(question, k=5)
             keyword_results = self.bm25_retriever.invoke(question)
@@ -136,9 +128,18 @@ class VectorStoreManager:
         except Exception:
             return self.bm25_retriever.invoke(question)
 
-# ======================
-# Streamlit Application
-# ======================
+def extract_clause(text: str) -> str:
+    patterns = [
+        r"(Clause\\s*\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)",
+        r"(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)",
+        r"(Clause\\s*\\d{1,2}\\.\\d{1,2}[a-zA-Z]?)",
+        r"(Clause\\s*\\d{1,2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return "Clause not found"
 
 def main():
     if "authenticated" not in st.session_state:
@@ -232,9 +233,14 @@ def main():
 
                 st.subheader("📌 Key Sources")
                 for i, doc in enumerate(result["source_documents"][:3]):
-                    with st.expander(f"Source {i+1} (Page {doc.metadata.get('page', 'N/A')})"):
-                        st.caption(f"**Relevance Score:** {doc.metadata.get('score', 0):.2f}")
-                        st.code(doc.page_content.strip(), language="text")
+                    page = doc.metadata.get("page", "N/A")
+                    preview = doc.page_content.strip().replace("\n", " ")[:500]
+                    clause_info = extract_clause(preview)
+
+                    with st.expander(f"Source {i+1} — Page {page}, {clause_info}"):
+                        st.caption(f"Relevance Score: {doc.metadata.get('score', 0):.2f}")
+                        st.code(preview, language="text")
+
             except Exception as e:
                 st.error(f"Query failed: {str(e)}")
 
