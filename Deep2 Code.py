@@ -123,6 +123,8 @@ if input_method == "Upload PDF":
             db = FAISS.from_documents(chunks, embeddings)
             db.save_local(vectorstore_dir)
             retriever = db.as_retriever()
+            llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
+            qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
 elif input_method == "Use Pre-chunked File":
     jsonl_file = st.file_uploader("📂 Upload your JSONL chunk file", type="jsonl")
@@ -139,13 +141,12 @@ elif input_method == "Use Pre-chunked File":
         embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
         db = FAISS.from_documents(chunks, embeddings)
         retriever = db.as_retriever()
+        llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
+        qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
 if not chunks and not input_method == "Use Pre-chunked File":
     st.info("Please upload a document")
     st.stop()
-
-llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
-qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
 query = st.text_input("💬 Ask your question:")
 if query:
