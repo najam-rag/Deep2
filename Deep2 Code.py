@@ -178,7 +178,7 @@ def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
 
     processor = DocumentProcessor()
     pdf_docs = processor.process(pdf_path)
-    grouped_pdf_docs = group_by_clause(pdf_docs)
+    grouped_pdf_docs = group_by_clause_with_notes(pdf_docs)
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     jsonl_split = splitter.split_documents(jsonl_chunks)
@@ -245,6 +245,54 @@ qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, r
 
 qa_vectorstore = get_qa_vectorstore()
 qa_retriever = qa_vectorstore.as_retriever()
+
+def group_by_clause_with_notes(docs: List[Document]) -> List[Document]:
+    grouped_docs = []
+    current_clause = None
+    current_text = ""
+    current_page = None
+    current_type = "Clause"
+
+    def save_current():
+        if current_text and current_clause:
+            grouped_docs.append(Document(
+                page_content=current_text.strip(),
+                metadata={
+                    "clause": current_clause,
+                    "page": current_page,
+                    "type": current_type,
+                    "source": "PDF"
+                }
+            ))
+
+    for doc in docs:
+        lines = doc.page_content.splitlines()
+        for line in lines:
+            stripped = line.strip()
+            clause_match = re.match(r"(?:Clause\s*)?(\d{1,2}(?:\.\d{1,2}){1,2})", stripped)
+            note_match = re.match(r"(NOTE(?:\s*\d*)?:?|Notes\s*:)", stripped, re.IGNORECASE)
+            exception_match = re.match(r"(EXCEPTION(?:\s*\d*)?:?|Exceptions\s*:)", stripped, re.IGNORECASE)
+
+            if clause_match:
+                save_current()
+                current_clause = clause_match.group(1)
+                current_text = line + "\n"
+                current_page = doc.metadata.get("page", None)
+                current_type = "Clause"
+            elif note_match:
+                save_current()
+                current_type = "Note"
+                current_text = line + "\n"
+            elif exception_match:
+                save_current()
+                current_type = "Exception"
+                current_text = line + "\n"
+            else:
+                current_text += line + "\n"
+
+    save_current()
+    return grouped_docs
+
 
 query = st.text_input("💬 Ask your question:")
 if query:
