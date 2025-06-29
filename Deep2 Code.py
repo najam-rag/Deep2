@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with Mini LLM Reasoning Layer
+# ✅ Smart RAG App with One-Time Vectorizing, Clause Grouping & Verified QA Memory + Feedback Correction
 import streamlit as st
 import os
 import hashlib
@@ -23,8 +23,7 @@ from langchain_community.vectorstores import FAISS
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.retrievers import BM25Retriever
 from langchain_openai import ChatOpenAI
-from langchain.chains import RetrievalQAWithSourcesChain, LLMChain
-from langchain.prompts import PromptTemplate
+from langchain.chains import RetrievalQAWithSourcesChain
 
 # === Configuration ===
 st.set_page_config(page_title="⚡ Clause Finder RAG App", layout="wide")
@@ -116,67 +115,6 @@ def group_by_clause(docs: List[Document]) -> List[Document]:
 
     return grouped_docs
 
-# === QA Memory Embedding with 5-Minute Refresh ===
-def load_qa_memory_jsonl():
-    url = "https://raw.githubusercontent.com/najam-rag/Deep2/main/qa_memory.jsonl"
-    response = requests.get(url)
-    qa_docs = []
-    if response.status_code == 200:
-        for line in response.text.strip().splitlines():
-            try:
-                record = json.loads(line)
-                qa_docs.append(Document(
-                    page_content=record["answer"],
-                    metadata={"question": record["query"], "source": "qa_memory"}
-                ))
-            except: continue
-    return qa_docs
-
-def get_qa_vectorstore():
-    now = time.time()
-    if "qa_vectorstore" not in st.session_state:
-        st.session_state.qa_vectorstore = None
-        st.session_state.qa_embed_time = 0
-
-    if (now - st.session_state.qa_embed_time) > 300 or st.session_state.qa_vectorstore is None:
-        docs = load_qa_memory_jsonl()
-        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-        st.session_state.qa_vectorstore = FAISS.from_documents(docs, embeddings)
-        st.session_state.qa_embed_time = now
-        st.toast("🔁 QA memory re-embedded.")
-    return st.session_state.qa_vectorstore
-
-# === Mini LLM Prompt Reasoning Chain ===
-reasoning_prompt = PromptTemplate.from_template("""
-You are a smart code assistant helping with standards like AS3000.
-Here is relevant context:
-{context}
-
-Question:
-{question}
-
-Based on the above, provide a clause-based reasoning answer.
-""")
-
-# === Push Correction to GitHub ===
-def push_to_github(record):
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-    get_res = requests.get(GITHUB_QA_FILE_URL, headers=headers)
-    if get_res.status_code != 200:
-        return False
-
-    sha = get_res.json()["sha"]
-    old_content = base64.b64decode(get_res.json()["content"]).decode("utf-8")
-    updated = old_content + json.dumps(record) + "\n"
-
-    payload = {
-        "message": f"Add correction: {record['query']}",
-        "content": base64.b64encode(updated.encode()).decode(),
-        "sha": sha
-    }
-    put_res = requests.put(GITHUB_QA_FILE_URL, headers=headers, json=payload)
-    return put_res.status_code in [200, 201]
-
 # === Load JSONL Chunks ===
 @st.cache_data(show_spinner=False)
 def load_jsonl_chunks_from_url(url: str):
@@ -203,26 +141,24 @@ def load_jsonl_chunks_from_url(url: str):
             continue
     return chunks
 
-# === Vectorstore Once ===
-def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
-    if "active_vectorstore" in st.session_state and st.session_state.get("vectorstore_hash") == file_hash:
-        return st.session_state.active_vectorstore
+# === Push Correction to GitHub ===
+def push_to_github(record):
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    get_res = requests.get(GITHUB_QA_FILE_URL, headers=headers)
+    if get_res.status_code != 200:
+        return False
 
-    processor = DocumentProcessor()
-    pdf_docs = processor.process(pdf_path)
-    grouped_pdf_docs = group_by_clause(pdf_docs)
+    sha = get_res.json()["sha"]
+    old_content = base64.b64decode(get_res.json()["content"]).decode("utf-8")
+    updated = old_content + json.dumps(record) + "\n"
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    jsonl_split = splitter.split_documents(jsonl_chunks)
-    pdf_split = splitter.split_documents(grouped_pdf_docs)
-    weighted_chunks = jsonl_split * 3 + pdf_split if jsonl_chunks else pdf_split
-
-    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-    db = FAISS.from_documents(weighted_chunks, embeddings)
-
-    st.session_state.active_vectorstore = db
-    st.session_state.vectorstore_hash = file_hash
-    return db
+    payload = {
+        "message": f"Add correction: {record['query']}",
+        "content": base64.b64encode(updated.encode()).decode(),
+        "sha": sha
+    }
+    put_res = requests.put(GITHUB_QA_FILE_URL, headers=headers, json=payload)
+    return put_res.status_code in [200, 201]
 
 # === Login ===
 st.sidebar.header("🔐 Login")
@@ -258,28 +194,40 @@ jsonl_chunks = load_jsonl_chunks_from_url(selected_jsonl_url) if selected_jsonl_
 db = initialize_vectorstore_once(file_hash, tmp_path, jsonl_chunks)
 retriever = db.as_retriever()
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
+qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
-# === Load QA Vectorstore ===
-qa_vectorstore = get_qa_vectorstore()
-qa_retriever = qa_vectorstore.as_retriever()
-
-# === Mini LLM Chain ===
-smart_chain = LLMChain(llm=llm, prompt=reasoning_prompt)
-
+# === Main Query ===
 query = st.text_input("💬 Ask your question:")
 if query:
-    retrieved_docs = qa_retriever.get_relevant_documents(query)
-    context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
-    smart_response = smart_chain.run({"context": context_text, "question": query})
+    result = qa({"question": query})
 
-    st.subheader("🤖 Smart Answer")
-    st.success(smart_response)
+    st.subheader("🔍 Answer")
+    st.success(result["answer"])
 
     st.subheader("📚 Source Snippets")
-    for i, doc in enumerate(retrieved_docs[:3]):
+    for i, doc in enumerate(result["source_documents"][:3]):
         page = doc.metadata.get("page", "N/A")
         clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
-        source = doc.metadata.get("source", "qa_memory")
+        source = doc.metadata.get("source", "uploaded PDF")
         preview = doc.page_content.strip().replace("\n", " ")[:500]
         with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page} ({source})"):
             st.code(preview, language="text")
+
+    st.markdown("---")
+    st.subheader("🧠 Was this answer correct?")
+    feedback_col1, feedback_col2 = st.columns([1, 3])
+    with feedback_col1:
+        is_correct = st.radio("Feedback", ["Yes", "No"], horizontal=True)
+
+    if is_correct == "No":
+        corrected = st.text_area("✍️ Enter the correct answer below:", height=150)
+        if st.button("✅ Submit Correction"):
+            if corrected.strip():
+                record = {"query": query.strip(), "answer": corrected.strip()}
+                success = push_to_github(record)
+                if success:
+                    st.success("✅ Correction saved to GitHub!")
+                else:
+                    st.error("❌ Failed to save correction to GitHub.")
+            else:
+                st.warning("Please enter a corrected answer before submitting.")
