@@ -171,26 +171,6 @@ def get_qa_vectorstore():
         st.toast("🔁 QA memory re-embedded.")
     return st.session_state.qa_vectorstore
 
-# === Initialize Vectorstore ===
-def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
-    if "active_vectorstore" in st.session_state and st.session_state.get("vectorstore_hash") == file_hash:
-        return st.session_state.active_vectorstore
-
-    processor = DocumentProcessor()
-    pdf_docs = processor.process(pdf_path)
-    grouped_pdf_docs = group_by_clause_with_notes(pdf_docs)
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    jsonl_split = splitter.split_documents(jsonl_chunks)
-    pdf_split = splitter.split_documents(grouped_pdf_docs)
-    weighted_chunks = jsonl_split * 3 + pdf_split if jsonl_chunks else pdf_split
-
-    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-    db = FAISS.from_documents(weighted_chunks, embeddings)
-
-    st.session_state.active_vectorstore = db
-    st.session_state.vectorstore_hash = file_hash
-    return db
-
 # === GitHub Correction Pusher ===
 def push_to_github(record):
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
@@ -293,6 +273,25 @@ def group_by_clause_with_notes(docs: List[Document]) -> List[Document]:
     save_current()
     return grouped_docs
 
+# === Initialize Vectorstore ===
+def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
+    if "active_vectorstore" in st.session_state and st.session_state.get("vectorstore_hash") == file_hash:
+        return st.session_state.active_vectorstore
+
+    processor = DocumentProcessor()
+    pdf_docs = processor.process(pdf_path)
+    grouped_pdf_docs = group_by_clause_with_notes(pdf_docs)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    jsonl_split = splitter.split_documents(jsonl_chunks)
+    pdf_split = splitter.split_documents(grouped_pdf_docs)
+    weighted_chunks = jsonl_split * 3 + pdf_split if jsonl_chunks else pdf_split
+
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+    db = FAISS.from_documents(weighted_chunks, embeddings)
+
+    st.session_state.active_vectorstore = db
+    st.session_state.vectorstore_hash = file_hash
+    return db
 
 query = st.text_input("💬 Ask your question:")
 if query:
