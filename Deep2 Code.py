@@ -191,3 +191,105 @@ def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
     st.session_state.active_vectorstore = db
     st.session_state.vectorstore_hash = file_hash
     return db
+
+
+
+# === Push Correction to GitHub ===
+def push_to_github(record):
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    get_res = requests.get(GITHUB_QA_FILE_URL, headers=headers)
+    if get_res.status_code != 200:
+        return False
+
+    sha = get_res.json()["sha"]
+    old_content = base64.b64decode(get_res.json()["content"]).decode("utf-8")
+    updated = old_content + json.dumps(record) + "\n"
+
+    payload = {
+        "message": f"Add correction: {record['query']}",
+        "content": base64.b64encode(updated.encode()).decode(),
+        "sha": sha
+    }
+    put_res = requests.put(GITHUB_QA_FILE_URL, headers=headers, json=payload)
+    return put_res.status_code in [200, 201]
+
+# === Login ===
+st.sidebar.header("🔐 Login")
+password = st.sidebar.text_input("Enter password", type="password")
+if password != "Password":
+    st.warning("🚫 Access denied")
+    st.stop()
+
+st.title("⚡ Clause-Smart Code Assistant")
+
+# === Code Selection ===
+code_option = st.sidebar.selectbox("📘 Select Code Standard", ["None", "AS3000", "AS3017", "AS3003"])
+code_to_jsonl = {
+    "AS3000": "https://raw.githubusercontent.com/najam-rag/Deep2/main/as3000_chunks_by_clause.jsonl",
+    "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/main/as3017_chunks.jsonl",
+    "AS3003": "https://raw.githubusercontent.com/YOUR_REPO/main/as3003_chunks.jsonl",
+}
+selected_jsonl_url = code_to_jsonl.get(code_option)
+
+# === Upload PDF ===
+uploaded_file = st.file_uploader("📌 Upload Your Code PDF", type="pdf")
+if not uploaded_file:
+    st.info("📌 Please upload a code PDF to begin.")
+    st.stop()
+
+with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+    tmp.write(uploaded_file.read())
+    tmp_path = tmp.name
+    file_hash = hashlib.md5(open(tmp_path, 'rb').read()).hexdigest()
+
+# === Build Vectorstore ===
+jsonl_chunks = load_jsonl_chunks_from_url(selected_jsonl_url) if selected_jsonl_url and code_option != "None" else []
+db = initialize_vectorstore_once(file_hash, tmp_path, jsonl_chunks)
+retriever = db.as_retriever()
+llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
+qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+
+# === Load QA Memory Vectorstore ===
+qa_vectorstore = get_qa_vectorstore()
+qa_retriever = qa_vectorstore.as_retriever()
+
+query = st.text_input("💬 Ask your question:")
+if query:
+    q_clean = query.strip().lower()
+    result = RetrievalQAWithSourcesChain.from_chain_type(
+        llm=llm,
+        retriever=qa_retriever,
+        return_source_documents=True
+    )({"question": query})
+
+    st.subheader("🔍 Answer")
+    st.success(result["answer"])
+
+    st.subheader("📚 Source Snippets")
+    for i, doc in enumerate(result["source_documents"][:3]):
+        page = doc.metadata.get("page", "N/A")
+        clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
+        source = doc.metadata.get("source", "uploaded PDF")
+        preview = doc.page_content.strip().replace("\n", " ")[:500]
+        with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page} ({source})"):
+            st.code(preview, language="text")
+
+    st.markdown("---")
+    st.subheader("🧠 Was this answer correct?")
+    feedback_col1, feedback_col2 = st.columns([1, 3])
+    with feedback_col1:
+        is_correct = st.radio("Feedback", ["Yes", "No"], horizontal=True)
+
+    if is_correct == "No":
+        corrected = st.text_area("✍️ Enter the correct answer below:", height=150)
+        if st.button("✅ Submit Correction"):
+            if corrected.strip():
+                record = {"query": query.strip(), "answer": corrected.strip()}
+                success = push_to_github(record)
+                if success:
+                    st.success("✅ Correction saved to GitHub!")
+                else:
+                    st.error("❌ Failed to save correction to GitHub.")
+            else:
+                st.warning("Please enter a corrected answer before submitting.")
+
