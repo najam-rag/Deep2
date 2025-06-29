@@ -5,6 +5,7 @@ import hashlib
 import tempfile
 import re
 import json
+import base64
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
@@ -26,9 +27,11 @@ from langchain.chains import RetrievalQAWithSourcesChain
 # === Configuration ===
 st.set_page_config(page_title="⚡ Clause Finder RAG App", layout="wide")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN")
 EMBEDDING_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-3.5-turbo-1106"
 OCR_THREADS = 4
+GITHUB_QA_FILE_URL = "https://api.github.com/repos/najam-rag/Deep2/contents/qa_memory.jsonl"
 
 # === Clause Extractor ===
 def extract_clause(text: str) -> str:
@@ -124,6 +127,25 @@ def load_qa_memory():
                 memory[record["query"].strip().lower()] = record["answer"]
             except: continue
     return memory
+
+# === Push Correction to GitHub ===
+def push_to_github(record):
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    get_res = requests.get(GITHUB_QA_FILE_URL, headers=headers)
+    if get_res.status_code != 200:
+        return False
+
+    sha = get_res.json()["sha"]
+    old_content = base64.b64decode(get_res.json()["content"]).decode("utf-8")
+    updated = old_content + json.dumps(record) + "\n"
+
+    payload = {
+        "message": f"Add correction: {record['query']}",
+        "content": base64.b64encode(updated.encode()).decode(),
+        "sha": sha
+    }
+    put_res = requests.put(GITHUB_QA_FILE_URL, headers=headers, json=payload)
+    return put_res.status_code in [200, 201]
 
 # === Load JSONL Chunks ===
 @st.cache_data(show_spinner=False)
@@ -241,8 +263,10 @@ if query:
         if st.button("✅ Submit Correction"):
             if corrected.strip():
                 record = {"query": query.strip(), "answer": corrected.strip()}
-                with open("qa_memory.jsonl", "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record) + "\n")
-                st.success("✅ Correction saved!")
+                success = push_to_github(record)
+                if success:
+                    st.success("✅ Correction saved to GitHub!")
+                else:
+                    st.error("❌ Failed to save correction to GitHub.")
             else:
                 st.warning("Please enter a corrected answer before submitting.")
