@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with Caching and Clause Grouping
+# ✅ Smart RAG App with Caching, Clause Grouping & Correct Answer Memory
 import streamlit as st
 import os
 import hashlib
@@ -111,6 +111,20 @@ def group_by_clause(docs: List[Document]) -> List[Document]:
 
     return grouped_docs
 
+# === QA Memory Loader ===
+@st.cache_data(show_spinner=False)
+def load_qa_memory():
+    url = "https://raw.githubusercontent.com/najam-rag/Deep2/main/qa_memory.jsonl"
+    response = requests.get(url)
+    memory = {}
+    if response.status_code == 200:
+        for line in response.text.splitlines():
+            try:
+                record = json.loads(line)
+                memory[record["query"].strip().lower()] = record["answer"]
+            except: continue
+    return memory
+
 # === Caching Helpers ===
 @st.cache_data(show_spinner=False)
 def load_jsonl_chunks_from_url(url: str):
@@ -180,6 +194,8 @@ if not uploaded_file:
 if "qa_cache" not in st.session_state:
     st.session_state.qa_cache = {}
 
+qa_memory = load_qa_memory()
+
 # === Process PDF ===
 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
     tmp.write(uploaded_file.read())
@@ -195,7 +211,10 @@ qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, r
 # === Query Interface ===
 query = st.text_input("💬 Ask your question:")
 if query:
-    if query in st.session_state.qa_cache:
+    q_clean = query.strip().lower()
+    if q_clean in qa_memory:
+        result = {"answer": qa_memory[q_clean], "source_documents": []}
+    elif query in st.session_state.qa_cache:
         result = st.session_state.qa_cache[query]
     else:
         result = qa({"question": query})
@@ -212,3 +231,21 @@ if query:
         preview = doc.page_content.strip().replace("\n", " ")[:500]
         with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page} ({source})"):
             st.code(preview, language="text")
+
+    st.markdown("---")
+    st.subheader("🧠 Was this answer correct?")
+    feedback_col1, feedback_col2 = st.columns([1, 3])
+    with feedback_col1:
+        is_correct = st.radio("Feedback", ["Yes", "No"], horizontal=True)
+
+    if is_correct == "No":
+        corrected = st.text_area("✍️ Enter the correct answer below:", height=150)
+        if st.button("✅ Submit Correction"):
+            if corrected.strip():
+                record = {"query": query.strip(), "answer": corrected.strip()}
+                with open("qa_memory.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+                st.session_state.qa_cache[query.strip()] = {"answer": corrected.strip(), "source_documents": []}
+                st.success("✅ Correction saved and applied!")
+            else:
+                st.warning("Please enter a corrected answer before submitting.")
