@@ -256,17 +256,28 @@ qa_retriever = qa_vectorstore.as_retriever()
 query = st.text_input("💬 Ask your question:")
 if query:
     q_clean = query.strip().lower()
-    result = RetrievalQAWithSourcesChain.from_chain_type(
-        llm=llm,
-        retriever=qa_retriever,
-        return_source_documents=True
-    )({"question": query})
+    qa_docs = qa_retriever.get_relevant_documents(query)
+    doc_docs = retriever.get_relevant_documents(query)
 
-    st.subheader("🔍 Answer")
-    st.success(result["answer"])
+    # Choose based on availability
+    if qa_docs:
+        final_docs = qa_docs
+        source_type = "QA memory"
+    else:
+        final_docs = doc_docs
+        source_type = "Embedded documents"
+
+    # Run QA chain manually
+    result = qa.combine_documents_chain.run(
+        input_documents=final_docs,
+        question=query
+    )
+
+    st.subheader("🔍 Answer (from " + source_type + ")")
+    st.success(result)
 
     st.subheader("📚 Source Snippets")
-    for i, doc in enumerate(result["source_documents"][:3]):
+    for i, doc in enumerate(final_docs[:3]):
         page = doc.metadata.get("page", "N/A")
         clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
         source = doc.metadata.get("source", "uploaded PDF")
