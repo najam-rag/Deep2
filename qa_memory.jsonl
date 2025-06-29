@@ -1,2 +1,3 @@
 
 {"query": "What is the minimum distance required between separated ELV and LV circuits in the same enclosure or duct?", "answer": "50 mm, unless an earthed metal barrier is provided, or if specific insulation levels are maintained.\nClause 3.9.8.2, Table 3.9"}
+{"query": "Is it acceptable to run active and neutral conductors in separate conduits if they are in parallel paths?", "answer": "No, they must be in close proximity to avoid induced voltages and comply with electromagnetic compatibility requirements.\nClause 3.9.8.4, 3.9.8.5"}
