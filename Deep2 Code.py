@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with Weighted JSONL and PDF Support (Grouped by Clause)
+# ✅ Smart RAG App with Caching and Clause Grouping
 import streamlit as st
 import os
 import hashlib
@@ -22,7 +22,6 @@ from langchain.embeddings import OpenAIEmbeddings
 from langchain.retrievers import BM25Retriever
 from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQAWithSourcesChain
-from langchain.vectorstores.utils import DistanceStrategy
 
 # === Configuration ===
 st.set_page_config(page_title="⚡ Clause Finder RAG App", layout="wide")
@@ -112,7 +111,48 @@ def group_by_clause(docs: List[Document]) -> List[Document]:
 
     return grouped_docs
 
-# === UI Login ===
+# === Caching Helpers ===
+@st.cache_data(show_spinner=False)
+def load_jsonl_chunks_from_url(url: str):
+    response = requests.get(url)
+    if response.status_code != 200:
+        return []
+    chunks = []
+    for line in response.text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            doc = Document(
+                page_content=obj["content"],
+                metadata={
+                    "clause": obj.get("metadata", {}).get("clause", "N/A"),
+                    "page": obj.get("metadata", {}).get("page", "N/A"),
+                    "source": "JSONL"
+                }
+            )
+            chunks.append(doc)
+        except json.JSONDecodeError:
+            continue
+    return chunks
+
+@st.cache_resource(show_spinner=False)
+def build_cached_vectorstore(file_hash, jsonl_chunks, pdf_path):
+    processor = DocumentProcessor()
+    pdf_docs = processor.process(pdf_path)
+    grouped_pdf_docs = group_by_clause(pdf_docs)
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    jsonl_split = splitter.split_documents(jsonl_chunks)
+    pdf_split = splitter.split_documents(grouped_pdf_docs)
+    weighted_chunks = jsonl_split * 3 + pdf_split if jsonl_chunks else pdf_split
+
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+    db = FAISS.from_documents(weighted_chunks, embeddings)
+    return db
+
+# === Login ===
 st.sidebar.header("🔐 Login")
 password = st.sidebar.text_input("Enter password", type="password")
 if password != "Password":
@@ -121,7 +161,7 @@ if password != "Password":
 
 st.title("⚡ Clause-Smart Code Assistant")
 
-# === Code Selection Dropdown ===
+# === Code Selection ===
 code_option = st.sidebar.selectbox("📘 Select Code Standard", ["None", "AS3000", "AS3017", "AS3003"])
 code_to_jsonl = {
     "AS3000": "https://raw.githubusercontent.com/najam-rag/Deep2/main/as3000_chunks_by_clause.jsonl",
@@ -130,62 +170,36 @@ code_to_jsonl = {
 }
 selected_jsonl_url = code_to_jsonl.get(code_option)
 
-# === PDF Upload ===
+# === File Upload ===
 uploaded_file = st.file_uploader("📌 Upload Your Code PDF", type="pdf")
 if not uploaded_file:
-    st.info("📎 Please upload a code PDF to begin.")
+    st.info("📌 Please upload a code PDF to begin.")
     st.stop()
 
-# === Load JSONL from GitHub (optional) ===
-jsonl_chunks = []
-if selected_jsonl_url and code_option != "None":
-    jsonl_response = requests.get(selected_jsonl_url)
-    if jsonl_response.status_code == 200:
-        for line in jsonl_response.text.strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                doc = Document(
-                    page_content=obj["content"],
-                    metadata={
-                        "clause": obj.get("metadata", {}).get("clause", "N/A"),
-                        "page": obj.get("metadata", {}).get("page", "N/A"),
-                        "source": "JSONL"
-                    }
-                )
-                jsonl_chunks.append(doc)
-            except json.JSONDecodeError:
-                st.warning("⚠️ Skipping malformed JSONL line.")
+# === QA Cache ===
+if "qa_cache" not in st.session_state:
+    st.session_state.qa_cache = {}
 
-# === Process Uploaded PDF ===
+# === Process PDF ===
 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
     tmp.write(uploaded_file.read())
     tmp_path = tmp.name
+    file_hash = hashlib.md5(open(tmp_path, 'rb').read()).hexdigest()
 
-processor = DocumentProcessor()
-pdf_docs = processor.process(tmp_path)
-grouped_pdf_docs = group_by_clause(pdf_docs)
-
-splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-jsonl_split = splitter.split_documents(jsonl_chunks)
-pdf_split = splitter.split_documents(grouped_pdf_docs)
-
-# === Combine with Weight: JSONL gets more weight via duplication ===
-weighted_chunks = jsonl_split * 3 + pdf_split if jsonl_chunks else pdf_split
-
-# === Embeddings & QA ===
-embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-db = FAISS.from_documents(weighted_chunks, embeddings)
+jsonl_chunks = load_jsonl_chunks_from_url(selected_jsonl_url) if selected_jsonl_url and code_option != "None" else []
+db = build_cached_vectorstore(file_hash, jsonl_chunks, tmp_path)
 retriever = db.as_retriever()
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
 qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
-# === Question Input ===
+# === Query Interface ===
 query = st.text_input("💬 Ask your question:")
 if query:
-    result = qa({"question": query})
+    if query in st.session_state.qa_cache:
+        result = st.session_state.qa_cache[query]
+    else:
+        result = qa({"question": query})
+        st.session_state.qa_cache[query] = result
 
     st.subheader("🔍 Answer")
     st.success(result["answer"])
@@ -196,6 +210,5 @@ if query:
         clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
         source = doc.metadata.get("source", "uploaded PDF")
         preview = doc.page_content.strip().replace("\n", " ")[:500]
-
         with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page} ({source})"):
             st.code(preview, language="text")
