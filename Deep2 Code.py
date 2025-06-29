@@ -27,7 +27,7 @@ from langchain.chains import RetrievalQAWithSourcesChain
 st.set_page_config(page_title="⚡ Clause Finder RAG App", layout="wide")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 EMBEDDING_MODEL = "text-embedding-3-small"
-LLM_MODEL = "gpt-4-turbo-preview"
+LLM_MODEL = "gpt-3.5-turbo-1106"
 OCR_THREADS = 4
 
 # === Clause Extractor ===
