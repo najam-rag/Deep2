@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with Weighted JSONL and PDF Support
+# ✅ Smart RAG App with Weighted JSONL and PDF Support (Grouped by Clause)
 import streamlit as st
 import os
 import hashlib
@@ -81,6 +81,37 @@ class DocumentProcessor:
     def _validate(self, docs):
         return bool(docs) and any(len(doc.page_content.strip()) > 50 for doc in docs)
 
+# === Grouping by Clause ===
+def group_by_clause(docs: List[Document]) -> List[Document]:
+    grouped_docs = []
+    current_clause = None
+    current_text = ""
+    current_page = None
+
+    for doc in docs:
+        lines = doc.page_content.splitlines()
+        for line in lines:
+            clause_match = re.match(r"(?:Clause\s*)?(\d{1,2}(?:\.\d{1,2}){1,2})", line.strip())
+            if clause_match:
+                if current_text and current_clause:
+                    grouped_docs.append(Document(
+                        page_content=current_text.strip(),
+                        metadata={"clause": current_clause, "page": current_page, "source": "PDF"}
+                    ))
+                current_clause = clause_match.group(1)
+                current_text = line + "\n"
+                current_page = doc.metadata.get("page", None)
+            else:
+                current_text += line + "\n"
+
+    if current_text and current_clause:
+        grouped_docs.append(Document(
+            page_content=current_text.strip(),
+            metadata={"clause": current_clause, "page": current_page, "source": "PDF"}
+        ))
+
+    return grouped_docs
+
 # === UI Login ===
 st.sidebar.header("🔐 Login")
 password = st.sidebar.text_input("Enter password", type="password")
@@ -91,7 +122,7 @@ if password != "Password":
 st.title("⚡ Clause-Smart Code Assistant")
 
 # === Code Selection Dropdown ===
-code_option = st.sidebar.selectbox("📘 Select Code Standard", ["AS3000", "AS3017", "AS3003"])
+code_option = st.sidebar.selectbox("📘 Select Code Standard", ["None", "AS3000", "AS3017", "AS3003"])
 code_to_jsonl = {
     "AS3000": "https://raw.githubusercontent.com/najam-rag/Deep2/main/as3000_chunks_by_clause.jsonl",
     "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/main/as3017_chunks.jsonl",
@@ -105,30 +136,28 @@ if not uploaded_file:
     st.info("📎 Please upload a code PDF to begin.")
     st.stop()
 
-# === Load JSONL from GitHub (SAFE)
-jsonl_response = requests.get(selected_jsonl_url)
-if jsonl_response.status_code != 200:
-    st.error("❌ Failed to fetch standard chunks from GitHub.")
-    st.stop()
-
+# === Load JSONL from GitHub (optional) ===
 jsonl_chunks = []
-for line in jsonl_response.text.strip().splitlines():
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        obj = json.loads(line)
-        doc = Document(
-            page_content=obj["content"],
-            metadata={
-                "clause": obj.get("metadata", {}).get("clause", "N/A"),
-                "page": obj.get("metadata", {}).get("page", "N/A"),
-                "source": "JSONL"
-            }
-        )
-        jsonl_chunks.append(doc)
-    except json.JSONDecodeError:
-        st.warning("⚠️ Skipping malformed JSONL line.")
+if selected_jsonl_url and code_option != "None":
+    jsonl_response = requests.get(selected_jsonl_url)
+    if jsonl_response.status_code == 200:
+        for line in jsonl_response.text.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                doc = Document(
+                    page_content=obj["content"],
+                    metadata={
+                        "clause": obj.get("metadata", {}).get("clause", "N/A"),
+                        "page": obj.get("metadata", {}).get("page", "N/A"),
+                        "source": "JSONL"
+                    }
+                )
+                jsonl_chunks.append(doc)
+            except json.JSONDecodeError:
+                st.warning("⚠️ Skipping malformed JSONL line.")
 
 # === Process Uploaded PDF ===
 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -137,13 +166,14 @@ with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
 
 processor = DocumentProcessor()
 pdf_docs = processor.process(tmp_path)
+grouped_pdf_docs = group_by_clause(pdf_docs)
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 jsonl_split = splitter.split_documents(jsonl_chunks)
-pdf_split = splitter.split_documents(pdf_docs)
+pdf_split = splitter.split_documents(grouped_pdf_docs)
 
 # === Combine with Weight: JSONL gets more weight via duplication ===
-weighted_chunks = jsonl_split * 3 + pdf_split  # Weight: JSONL 3x stronger
+weighted_chunks = jsonl_split * 3 + pdf_split if jsonl_chunks else pdf_split
 
 # === Embeddings & QA ===
 embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
