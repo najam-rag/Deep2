@@ -32,6 +32,33 @@ LLM_MODEL = "gpt-3.5-turbo-1106"
 OCR_THREADS = 4
 GITHUB_QA_FILE_URL = "https://api.github.com/repos/najam-rag/Deep2/contents/qa_memory.jsonl"
 
+# === Helper Functions for Query Matching ===
+def extract_keywords(text):
+    return re.findall(r"[a-zA-Z]{3,}", text.lower())
+
+def get_best_qa_match(query, qa_docs):
+    query_keywords = extract_keywords(query)
+    if not query_keywords:
+        return []
+    candidates = []
+    for doc in qa_docs:
+        q = doc.metadata.get("question", "").lower()
+        score = sum(1 for word in query_keywords if word in q)
+        if score > 0:
+            candidates.append((score, doc))
+    candidates.sort(reverse=True, key=lambda x: x[0])
+    return [c[1] for c in candidates[:3]] if candidates else []
+
+def deduplicate_by_content(docs):
+    seen = set()
+    unique_docs = []
+    for d in docs:
+        snippet = d.page_content.strip()[:100]
+        if snippet not in seen:
+            seen.add(snippet)
+            unique_docs.append(d)
+    return unique_docs
+
 # === Clause Extractor ===
 def extract_clause(text: str) -> str:
     patterns = [
@@ -263,32 +290,6 @@ qa_vectorstore = get_qa_vectorstore()
 
 query = st.text_input("💬 Ask your question:")
 if query:
-    def extract_keywords(text):
-        return re.findall(r"[a-zA-Z]{3,}", text.lower())
-
-    def get_best_qa_match(query, qa_docs):
-        query_keywords = extract_keywords(query)
-        if not query_keywords:
-            return []
-        candidates = []
-        for doc in qa_docs:
-            q = doc.metadata.get("question", "").lower()
-            score = sum(1 for word in query_keywords if word in q)
-            if score > 0:
-                candidates.append((score, doc))
-        candidates.sort(reverse=True, key=lambda x: x[0])
-        return [c[1] for c in candidates[:3]] if candidates else []
-
-    def deduplicate_by_content(docs):
-        seen = set()
-        unique_docs = []
-        for d in docs:
-            snippet = d.page_content.strip()[:100]
-            if snippet not in seen:
-                seen.add(snippet)
-                unique_docs.append(d)
-        return unique_docs
-
     qa_docs_all = load_qa_memory_jsonl()
     qa_docs = get_best_qa_match(query, qa_docs_all)
     doc_docs = retriever.get_relevant_documents(query)
