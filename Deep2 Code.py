@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with One-Time Vectorizing, QA Memory, Feedback Correction
+# ✅ Smart RAG App with One-Time Vectorizing, QA Memory, Verified Override, Feedback Correction
 import streamlit as st
 import os
 import hashlib
@@ -141,7 +141,7 @@ def load_jsonl_chunks_from_url(url: str):
             continue
     return chunks
 
-# === QA Memory Embedding with 5-Minute Refresh ===
+# === QA Memory ===
 def load_qa_memory_jsonl():
     url = "https://raw.githubusercontent.com/najam-rag/Deep2/main/qa_memory.jsonl"
     response = requests.get(url)
@@ -171,7 +171,7 @@ def get_qa_vectorstore():
         st.toast("🔁 QA memory re-embedded.")
     return st.session_state.qa_vectorstore
 
-# === Vectorstore Initialization with File Hash ===
+# === Initialize Vectorstore ===
 def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
     if "active_vectorstore" in st.session_state and st.session_state.get("vectorstore_hash") == file_hash:
         return st.session_state.active_vectorstore
@@ -192,9 +192,7 @@ def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
     st.session_state.vectorstore_hash = file_hash
     return db
 
-
-
-# === Push Correction to GitHub ===
+# === GitHub Correction Pusher ===
 def push_to_github(record):
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
     get_res = requests.get(GITHUB_QA_FILE_URL, headers=headers)
@@ -213,16 +211,14 @@ def push_to_github(record):
     put_res = requests.put(GITHUB_QA_FILE_URL, headers=headers, json=payload)
     return put_res.status_code in [200, 201]
 
-# === Login ===
+# === UI Setup ===
 st.sidebar.header("🔐 Login")
-password = st.sidebar.text_input("Enter password", type="password")
-if password != "Password":
+if st.sidebar.text_input("Enter password", type="password") != "Password":
     st.warning("🚫 Access denied")
     st.stop()
 
 st.title("⚡ Clause-Smart Code Assistant")
 
-# === Code Selection ===
 code_option = st.sidebar.selectbox("📘 Select Code Standard", ["None", "AS3000", "AS3017", "AS3003"])
 code_to_jsonl = {
     "AS3000": "https://raw.githubusercontent.com/najam-rag/Deep2/main/as3000_chunks_by_clause.jsonl",
@@ -231,7 +227,6 @@ code_to_jsonl = {
 }
 selected_jsonl_url = code_to_jsonl.get(code_option)
 
-# === Upload PDF ===
 uploaded_file = st.file_uploader("📌 Upload Your Code PDF", type="pdf")
 if not uploaded_file:
     st.info("📌 Please upload a code PDF to begin.")
@@ -242,42 +237,38 @@ with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
     tmp_path = tmp.name
     file_hash = hashlib.md5(open(tmp_path, 'rb').read()).hexdigest()
 
-# === Build Vectorstore ===
 jsonl_chunks = load_jsonl_chunks_from_url(selected_jsonl_url) if selected_jsonl_url and code_option != "None" else []
 db = initialize_vectorstore_once(file_hash, tmp_path, jsonl_chunks)
 retriever = db.as_retriever()
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
 qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
-# === Load QA Memory Vectorstore ===
 qa_vectorstore = get_qa_vectorstore()
 qa_retriever = qa_vectorstore.as_retriever()
 
 query = st.text_input("💬 Ask your question:")
 if query:
-    q_clean = query.strip().lower()
     qa_docs = qa_retriever.get_relevant_documents(query)
     doc_docs = retriever.get_relevant_documents(query)
 
-    # Choose based on availability
-    if qa_docs:
-        final_docs = qa_docs
-        source_type = "QA memory"
-    else:
-        final_docs = doc_docs
-        source_type = "Embedded documents"
+    def deduplicate_by_content(docs):
+        seen = set()
+        unique_docs = []
+        for d in docs:
+            snippet = d.page_content.strip()[:100]
+            if snippet not in seen:
+                seen.add(snippet)
+                unique_docs.append(d)
+        return unique_docs
 
-    # Run QA chain manually
-    result = qa.combine_documents_chain.run(
-        input_documents=final_docs,
-        question=query
-    )
+    merged_docs = deduplicate_by_content(qa_docs + doc_docs)
+    result = qa.combine_documents_chain.run(input_documents=merged_docs, question=query)
 
-    st.subheader("🔍 Answer (from " + source_type + ")")
+    st.subheader("🔍 Answer")
     st.success(result)
 
     st.subheader("📚 Source Snippets")
-    for i, doc in enumerate(final_docs[:3]):
+    for i, doc in enumerate(merged_docs[:3]):
         page = doc.metadata.get("page", "N/A")
         clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
         source = doc.metadata.get("source", "uploaded PDF")
@@ -303,4 +294,3 @@ if query:
                     st.error("❌ Failed to save correction to GitHub.")
             else:
                 st.warning("Please enter a corrected answer before submitting.")
-
