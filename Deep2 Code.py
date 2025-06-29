@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with One-Time Vectorizing, Clause Grouping & Correction Memory + QA Memory Timer
+# ✅ Smart RAG App with One-Time Vectorizing, Clause Grouping & Correction Memory + QA Memory Timer + Memory Verification
 import streamlit as st
 import os
 import hashlib
@@ -120,30 +120,36 @@ def load_qa_memory_jsonl():
     url = "https://raw.githubusercontent.com/najam-rag/Deep2/main/qa_memory.jsonl"
     response = requests.get(url)
     qa_docs = []
+    qa_memory_dict = {}
     if response.status_code == 200:
         for line in response.text.strip().splitlines():
             try:
                 record = json.loads(line)
-                qa_docs.append(Document(
+                doc = Document(
                     page_content=record["answer"],
                     metadata={"question": record["query"], "source": "qa_memory"}
-                ))
+                )
+                qa_docs.append(doc)
+                qa_memory_dict[record["query"].strip().lower()] = record["answer"]
             except: continue
-    return qa_docs
+    return qa_docs, qa_memory_dict
+
 
 def get_qa_vectorstore():
     now = time.time()
     if "qa_vectorstore" not in st.session_state:
         st.session_state.qa_vectorstore = None
         st.session_state.qa_embed_time = 0
+        st.session_state.qa_memory_dict = {}
 
     if (now - st.session_state.qa_embed_time) > 300 or st.session_state.qa_vectorstore is None:
-        docs = load_qa_memory_jsonl()
+        docs, qa_dict = load_qa_memory_jsonl()
         embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
         st.session_state.qa_vectorstore = FAISS.from_documents(docs, embeddings)
         st.session_state.qa_embed_time = now
+        st.session_state.qa_memory_dict = qa_dict
         st.toast("🔁 QA memory re-embedded.")
-    return st.session_state.qa_vectorstore
+    return st.session_state.qa_vectorstore, st.session_state.qa_memory_dict
 
 # === Push Correction to GitHub ===
 def push_to_github(record):
@@ -245,26 +251,41 @@ jsonl_chunks = load_jsonl_chunks_from_url(selected_jsonl_url) if selected_jsonl_
 db = initialize_vectorstore_once(file_hash, tmp_path, jsonl_chunks)
 retriever = db.as_retriever()
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
-qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+qa_chain = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
 # === Load QA Memory Vectorstore ===
-qa_vectorstore = get_qa_vectorstore()
+qa_vectorstore, qa_memory_dict = get_qa_vectorstore()
 qa_retriever = qa_vectorstore.as_retriever()
 
 query = st.text_input("💬 Ask your question:")
 if query:
     q_clean = query.strip().lower()
-    result = RetrievalQAWithSourcesChain.from_chain_type(
-        llm=llm,
-        retriever=qa_retriever,
-        return_source_documents=True
-    )({"question": query})
+    memory_answer = qa_memory_dict.get(q_clean)
+    verified_result = qa_chain({"question": query})
 
-    st.subheader("🔍 Answer")
-    st.success(result["answer"])
+    if memory_answer:
+        st.subheader("🧐 Memory Answer")
+        st.success(memory_answer)
+        st.caption("🤖 Verifying answer from code...")
+
+        # Optional similarity check
+        from difflib import SequenceMatcher
+        def similarity(a, b):
+            return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+        sim_score = similarity(memory_answer, verified_result["answer"])
+        if sim_score >= 0.75:
+            st.success("✅ Verified from code")
+        else:
+            st.error("❌ Possible mismatch — see updated answer below")
+            st.subheader("🔍 Updated Verified Answer")
+            st.success(verified_result["answer"])
+    else:
+        st.subheader("🔍 Verified Answer")
+        st.success(verified_result["answer"])
 
     st.subheader("📚 Source Snippets")
-    for i, doc in enumerate(result["source_documents"][:3]):
+    for i, doc in enumerate(verified_result["source_documents"][:3]):
         page = doc.metadata.get("page", "N/A")
         clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
         source = doc.metadata.get("source", "uploaded PDF")
