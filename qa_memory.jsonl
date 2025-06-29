@@ -10,3 +10,4 @@
 {"query": "When must a switchboard be rated for 63 A", "answer": "When the maximum demand or main switch rating exceeds 63 A. Clause 2.4.3"}
 {"query": "What is the maximum disconnection time allowed for final subcircuits supplying socket outlets?", "answer": "0.4 seconds for circuits not exceeding 32 A. Clause 1.7.4.2"}
 {"query": "In what scenario is earth continuity conductor allowed to be same size as active?", "answer": "When conductor is \u226416 mm\u00b2 copper (or 25 mm\u00b2 aluminium), earthing conductor can be same size as active Table 5.1, Note 1"}
+{"query": "can you run an unearthed metallic conduit in a ceiling space containing LV circuits?", "answer": "No, metallic conduits must be earthed if there\u2019s any chance they may become live, even if they\u2019re empty or not enclosing a conductor. Clause 5.4.3.1"}
