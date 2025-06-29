@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with One-Time Vectorizing, Clause Grouping & Verified QA Memory + Feedback Correction
+# ✅ Smart RAG App with One-Time Vectorizing, QA Memory, Feedback Correction
 import streamlit as st
 import os
 import hashlib
@@ -141,93 +141,53 @@ def load_jsonl_chunks_from_url(url: str):
             continue
     return chunks
 
-# === Push Correction to GitHub ===
-def push_to_github(record):
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-    get_res = requests.get(GITHUB_QA_FILE_URL, headers=headers)
-    if get_res.status_code != 200:
-        return False
+# === QA Memory Embedding with 5-Minute Refresh ===
+def load_qa_memory_jsonl():
+    url = "https://raw.githubusercontent.com/najam-rag/Deep2/main/qa_memory.jsonl"
+    response = requests.get(url)
+    qa_docs = []
+    if response.status_code == 200:
+        for line in response.text.strip().splitlines():
+            try:
+                record = json.loads(line)
+                qa_docs.append(Document(
+                    page_content=record["answer"],
+                    metadata={"question": record["query"], "source": "qa_memory"}
+                ))
+            except: continue
+    return qa_docs
 
-    sha = get_res.json()["sha"]
-    old_content = base64.b64decode(get_res.json()["content"]).decode("utf-8")
-    updated = old_content + json.dumps(record) + "\n"
+def get_qa_vectorstore():
+    now = time.time()
+    if "qa_vectorstore" not in st.session_state:
+        st.session_state.qa_vectorstore = None
+        st.session_state.qa_embed_time = 0
 
-    payload = {
-        "message": f"Add correction: {record['query']}",
-        "content": base64.b64encode(updated.encode()).decode(),
-        "sha": sha
-    }
-    put_res = requests.put(GITHUB_QA_FILE_URL, headers=headers, json=payload)
-    return put_res.status_code in [200, 201]
+    if (now - st.session_state.qa_embed_time) > 300 or st.session_state.qa_vectorstore is None:
+        docs = load_qa_memory_jsonl()
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+        st.session_state.qa_vectorstore = FAISS.from_documents(docs, embeddings)
+        st.session_state.qa_embed_time = now
+        st.toast("🔁 QA memory re-embedded.")
+    return st.session_state.qa_vectorstore
 
-# === Login ===
-st.sidebar.header("🔐 Login")
-password = st.sidebar.text_input("Enter password", type="password")
-if password != "Password":
-    st.warning("🚫 Access denied")
-    st.stop()
+# === Vectorstore Initialization with File Hash ===
+def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
+    if "active_vectorstore" in st.session_state and st.session_state.get("vectorstore_hash") == file_hash:
+        return st.session_state.active_vectorstore
 
-st.title("⚡ Clause-Smart Code Assistant")
+    processor = DocumentProcessor()
+    pdf_docs = processor.process(pdf_path)
+    grouped_pdf_docs = group_by_clause(pdf_docs)
 
-# === Code Selection ===
-code_option = st.sidebar.selectbox("📘 Select Code Standard", ["None", "AS3000", "AS3017", "AS3003"])
-code_to_jsonl = {
-    "AS3000": "https://raw.githubusercontent.com/najam-rag/Deep2/main/as3000_chunks_by_clause.jsonl",
-    "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/main/as3017_chunks.jsonl",
-    "AS3003": "https://raw.githubusercontent.com/YOUR_REPO/main/as3003_chunks.jsonl",
-}
-selected_jsonl_url = code_to_jsonl.get(code_option)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    jsonl_split = splitter.split_documents(jsonl_chunks)
+    pdf_split = splitter.split_documents(grouped_pdf_docs)
+    weighted_chunks = jsonl_split * 3 + pdf_split if jsonl_chunks else pdf_split
 
-# === Upload PDF ===
-uploaded_file = st.file_uploader("📌 Upload Your Code PDF", type="pdf")
-if not uploaded_file:
-    st.info("📌 Please upload a code PDF to begin.")
-    st.stop()
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+    db = FAISS.from_documents(weighted_chunks, embeddings)
 
-with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-    tmp.write(uploaded_file.read())
-    tmp_path = tmp.name
-    file_hash = hashlib.md5(open(tmp_path, 'rb').read()).hexdigest()
-
-# === Build Vectorstore ===
-jsonl_chunks = load_jsonl_chunks_from_url(selected_jsonl_url) if selected_jsonl_url and code_option != "None" else []
-db = initialize_vectorstore_once(file_hash, tmp_path, jsonl_chunks)
-retriever = db.as_retriever()
-llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
-qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
-
-# === Main Query ===
-query = st.text_input("💬 Ask your question:")
-if query:
-    result = qa({"question": query})
-
-    st.subheader("🔍 Answer")
-    st.success(result["answer"])
-
-    st.subheader("📚 Source Snippets")
-    for i, doc in enumerate(result["source_documents"][:3]):
-        page = doc.metadata.get("page", "N/A")
-        clause_info = doc.metadata.get("clause", extract_clause(doc.page_content))
-        source = doc.metadata.get("source", "uploaded PDF")
-        preview = doc.page_content.strip().replace("\n", " ")[:500]
-        with st.expander(f"Source {i+1} — Clause {clause_info}, Page {page} ({source})"):
-            st.code(preview, language="text")
-
-    st.markdown("---")
-    st.subheader("🧠 Was this answer correct?")
-    feedback_col1, feedback_col2 = st.columns([1, 3])
-    with feedback_col1:
-        is_correct = st.radio("Feedback", ["Yes", "No"], horizontal=True)
-
-    if is_correct == "No":
-        corrected = st.text_area("✍️ Enter the correct answer below:", height=150)
-        if st.button("✅ Submit Correction"):
-            if corrected.strip():
-                record = {"query": query.strip(), "answer": corrected.strip()}
-                success = push_to_github(record)
-                if success:
-                    st.success("✅ Correction saved to GitHub!")
-                else:
-                    st.error("❌ Failed to save correction to GitHub.")
-            else:
-                st.warning("Please enter a corrected answer before submitting.")
+    st.session_state.active_vectorstore = db
+    st.session_state.vectorstore_hash = file_hash
+    return db
