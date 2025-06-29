@@ -1,4 +1,4 @@
-# ✅ Smart RAG App with One-Time Vectorizing, Clause Grouping & Correction Memory
+# ✅ Smart RAG App with One-Time Vectorizing, Clause Grouping & Correction Memory + QA Memory Timer
 import streamlit as st
 import os
 import hashlib
@@ -6,6 +6,7 @@ import tempfile
 import re
 import json
 import base64
+import time
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
@@ -114,19 +115,35 @@ def group_by_clause(docs: List[Document]) -> List[Document]:
 
     return grouped_docs
 
-# === QA Memory ===
-@st.cache_data(show_spinner=False)
-def load_qa_memory():
+# === QA Memory Embedding with 5-Minute Refresh ===
+def load_qa_memory_jsonl():
     url = "https://raw.githubusercontent.com/najam-rag/Deep2/main/qa_memory.jsonl"
     response = requests.get(url)
-    memory = {}
+    qa_docs = []
     if response.status_code == 200:
-        for line in response.text.splitlines():
+        for line in response.text.strip().splitlines():
             try:
                 record = json.loads(line)
-                memory[record["query"].strip().lower()] = record["answer"]
+                qa_docs.append(Document(
+                    page_content=record["answer"],
+                    metadata={"question": record["query"], "source": "qa_memory"}
+                ))
             except: continue
-    return memory
+    return qa_docs
+
+def get_qa_vectorstore():
+    now = time.time()
+    if "qa_vectorstore" not in st.session_state:
+        st.session_state.qa_vectorstore = None
+        st.session_state.qa_embed_time = 0
+
+    if (now - st.session_state.qa_embed_time) > 300 or st.session_state.qa_vectorstore is None:
+        docs = load_qa_memory_jsonl()
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+        st.session_state.qa_vectorstore = FAISS.from_documents(docs, embeddings)
+        st.session_state.qa_embed_time = now
+        st.toast("🔁 QA memory re-embedded.")
+    return st.session_state.qa_vectorstore
 
 # === Push Correction to GitHub ===
 def push_to_github(record):
@@ -230,15 +247,18 @@ retriever = db.as_retriever()
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
 qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
-qa_memory = load_qa_memory()
+# === Load QA Memory Vectorstore ===
+qa_vectorstore = get_qa_vectorstore()
+qa_retriever = qa_vectorstore.as_retriever()
 
 query = st.text_input("💬 Ask your question:")
 if query:
     q_clean = query.strip().lower()
-    if q_clean in qa_memory:
-        result = {"answer": qa_memory[q_clean], "source_documents": []}
-    else:
-        result = qa({"question": query})
+    result = RetrievalQAWithSourcesChain.from_chain_type(
+        llm=llm,
+        retriever=qa_retriever,
+        return_source_documents=True
+    )({"question": query})
 
     st.subheader("🔍 Answer")
     st.success(result["answer"])
