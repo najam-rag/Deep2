@@ -178,8 +178,7 @@ def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
 
     processor = DocumentProcessor()
     pdf_docs = processor.process(pdf_path)
-    grouped_pdf_docs = group_by_clause_with_notes(pdf_docs)
-
+    
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     jsonl_split = splitter.split_documents(jsonl_chunks)
     pdf_split = splitter.split_documents(grouped_pdf_docs)
@@ -246,6 +245,7 @@ qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, r
 qa_vectorstore = get_qa_vectorstore()
 qa_retriever = qa_vectorstore.as_retriever()
 
+grouped_pdf_docs = group_by_clause_with_notes(pdf_docs)
 def group_by_clause_with_notes(docs: List[Document]) -> List[Document]:
     grouped_docs = []
     current_clause = None
