@@ -296,7 +296,29 @@ def group_by_clause_with_notes(docs: List[Document]) -> List[Document]:
 
 query = st.text_input("💬 Ask your question:")
 if query:
-    qa_docs = qa_retriever.get_relevant_documents(query)
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    def extract_keywords(text):
+        return re.findall(r"[a-zA-Z]{3,}", text.lower())
+
+    def get_best_qa_match(query, qa_docs):
+        query_keywords = extract_keywords(query)
+        if not query_keywords:
+            return []
+    
+        candidates = []
+        for doc in qa_docs:
+            q = doc.metadata.get("question", "").lower()
+            score = sum(1 for word in query_keywords if word in q)
+            if score > 0:
+                candidates.append((score, doc))
+    
+        candidates.sort(reverse=True, key=lambda x: x[0])
+        return [c[1] for c in candidates[:3]] if candidates else []
+
+    qa_docs_all = load_qa_memory_jsonl()
+    qa_docs = get_best_qa_match(query, qa_docs_all)
     doc_docs = retriever.get_relevant_documents(query)
 
     def deduplicate_by_content(docs):
