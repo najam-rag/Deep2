@@ -9,3 +9,4 @@
 {"query": "Is it legal to loop a neutral conductor between socket outlets in a final subcircuit?", "answer": "Yes, if all connections are electrically and mechanically sound, and conductor sizes are compliant. Clause 3.7.2.5"}
 {"query": "When must a switchboard be rated for 63 A", "answer": "When the maximum demand or main switch rating exceeds 63 A. Clause 2.4.3"}
 {"query": "What is the maximum disconnection time allowed for final subcircuits supplying socket outlets?", "answer": "0.4 seconds for circuits not exceeding 32 A. Clause 1.7.4.2"}
+{"query": "In what scenario is earth continuity conductor allowed to be same size as active?", "answer": "When conductor is \u226416 mm\u00b2 copper (or 25 mm\u00b2 aluminium), earthing conductor can be same size as active Table 5.1, Note 1"}
