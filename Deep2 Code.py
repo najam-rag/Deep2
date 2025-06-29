@@ -18,10 +18,8 @@ import requests
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-
 from langchain_community.vectorstores import FAISS
 from langchain.embeddings import OpenAIEmbeddings
-from langchain.retrievers import BM25Retriever
 from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQAWithSourcesChain
 
@@ -84,148 +82,7 @@ class DocumentProcessor:
     def _validate(self, docs):
         return bool(docs) and any(len(doc.page_content.strip()) > 50 for doc in docs)
 
-# === Grouping by Clause ===
-def group_by_clause(docs: List[Document]) -> List[Document]:
-    grouped_docs = []
-    current_clause = None
-    current_text = ""
-    current_page = None
-
-    for doc in docs:
-        lines = doc.page_content.splitlines()
-        for line in lines:
-            clause_match = re.match(r"(?:Clause\s*)?(\d{1,2}(?:\.\d{1,2}){1,2})", line.strip())
-            if clause_match:
-                if current_text and current_clause:
-                    grouped_docs.append(Document(
-                        page_content=current_text.strip(),
-                        metadata={"clause": current_clause, "page": current_page, "source": "PDF"}
-                    ))
-                current_clause = clause_match.group(1)
-                current_text = line + "\n"
-                current_page = doc.metadata.get("page", None)
-            else:
-                current_text += line + "\n"
-
-    if current_text and current_clause:
-        grouped_docs.append(Document(
-            page_content=current_text.strip(),
-            metadata={"clause": current_clause, "page": current_page, "source": "PDF"}
-        ))
-
-    return grouped_docs
-
-# === Load JSONL Chunks ===
-@st.cache_data(show_spinner=False)
-def load_jsonl_chunks_from_url(url: str):
-    response = requests.get(url)
-    if response.status_code != 200:
-        return []
-    chunks = []
-    for line in response.text.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-            doc = Document(
-                page_content=obj["content"],
-                metadata={
-                    "clause": obj.get("metadata", {}).get("clause", "N/A"),
-                    "page": obj.get("metadata", {}).get("page", "N/A"),
-                    "source": "JSONL"
-                }
-            )
-            chunks.append(doc)
-        except json.JSONDecodeError:
-            continue
-    return chunks
-
-# === QA Memory ===
-def load_qa_memory_jsonl():
-    url = "https://raw.githubusercontent.com/najam-rag/Deep2/main/qa_memory.jsonl"
-    response = requests.get(url)
-    qa_docs = []
-    if response.status_code == 200:
-        for line in response.text.strip().splitlines():
-            try:
-                record = json.loads(line)
-                qa_docs.append(Document(
-                    page_content=record["answer"],
-                    metadata={"question": record["query"], "source": "qa_memory"}
-                ))
-            except: continue
-    return qa_docs
-
-def get_qa_vectorstore():
-    now = time.time()
-    if "qa_vectorstore" not in st.session_state:
-        st.session_state.qa_vectorstore = None
-        st.session_state.qa_embed_time = 0
-
-    if (now - st.session_state.qa_embed_time) > 300 or st.session_state.qa_vectorstore is None:
-        docs = load_qa_memory_jsonl()
-        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
-        st.session_state.qa_vectorstore = FAISS.from_documents(docs, embeddings)
-        st.session_state.qa_embed_time = now
-        st.toast("🔁 QA memory re-embedded.")
-    return st.session_state.qa_vectorstore
-
-# === GitHub Correction Pusher ===
-def push_to_github(record):
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-    get_res = requests.get(GITHUB_QA_FILE_URL, headers=headers)
-    if get_res.status_code != 200:
-        return False
-
-    sha = get_res.json()["sha"]
-    old_content = base64.b64decode(get_res.json()["content"]).decode("utf-8")
-    updated = old_content + json.dumps(record) + "\n"
-
-    payload = {
-        "message": f"Add correction: {record['query']}",
-        "content": base64.b64encode(updated.encode()).decode(),
-        "sha": sha
-    }
-    put_res = requests.put(GITHUB_QA_FILE_URL, headers=headers, json=payload)
-    return put_res.status_code in [200, 201]
-
-# === UI Setup ===
-st.sidebar.header("🔐 Login")
-if st.sidebar.text_input("Enter password", type="password") != "Password":
-    st.warning("🚫 Access denied")
-    st.stop()
-
-st.title("⚡ Clause-Smart Code Assistant")
-
-code_option = st.sidebar.selectbox("📘 Select Code Standard", ["None", "AS3000", "AS3017", "AS3003"])
-code_to_jsonl = {
-    "AS3000": "https://raw.githubusercontent.com/najam-rag/Deep2/main/as3000_chunks_by_clause.jsonl",
-    "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/main/as3017_chunks.jsonl",
-    "AS3003": "https://raw.githubusercontent.com/YOUR_REPO/main/as3003_chunks.jsonl",
-}
-selected_jsonl_url = code_to_jsonl.get(code_option)
-
-uploaded_file = st.file_uploader("📌 Upload Your Code PDF", type="pdf")
-if not uploaded_file:
-    st.info("📌 Please upload a code PDF to begin.")
-    st.stop()
-
-with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-    tmp.write(uploaded_file.read())
-    tmp_path = tmp.name
-    file_hash = hashlib.md5(open(tmp_path, 'rb').read()).hexdigest()
-
-jsonl_chunks = load_jsonl_chunks_from_url(selected_jsonl_url) if selected_jsonl_url and code_option != "None" else []
-db = initialize_vectorstore_once(file_hash, tmp_path, jsonl_chunks)
-retriever = db.as_retriever()
-llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
-qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
-
-qa_vectorstore = get_qa_vectorstore()
-qa_retriever = qa_vectorstore.as_retriever()
-
-grouped_pdf_docs = group_by_clause_with_notes(pdf_docs)
+# === Grouping by Clause with Notes and Exceptions ===
 def group_by_clause_with_notes(docs: List[Document]) -> List[Document]:
     grouped_docs = []
     current_clause = None
@@ -273,7 +130,82 @@ def group_by_clause_with_notes(docs: List[Document]) -> List[Document]:
     save_current()
     return grouped_docs
 
-# === Initialize Vectorstore ===
+# === JSONL Loader ===
+@st.cache_data(show_spinner=False)
+def load_jsonl_chunks_from_url(url: str):
+    response = requests.get(url)
+    if response.status_code != 200:
+        return []
+    chunks = []
+    for line in response.text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            doc = Document(
+                page_content=obj["content"],
+                metadata={
+                    "clause": obj.get("metadata", {}).get("clause", "N/A"),
+                    "page": obj.get("metadata", {}).get("page", "N/A"),
+                    "source": "JSONL"
+                }
+            )
+            chunks.append(doc)
+        except json.JSONDecodeError:
+            continue
+    return chunks
+
+# === QA Memory Embedding ===
+def load_qa_memory_jsonl():
+    url = "https://raw.githubusercontent.com/najam-rag/Deep2/main/qa_memory.jsonl"
+    response = requests.get(url)
+    qa_docs = []
+    if response.status_code == 200:
+        for line in response.text.strip().splitlines():
+            try:
+                record = json.loads(line)
+                qa_docs.append(Document(
+                    page_content=record["answer"],
+                    metadata={"question": record["query"], "source": "qa_memory"}
+                ))
+            except: continue
+    return qa_docs
+
+def get_qa_vectorstore():
+    now = time.time()
+    if "qa_vectorstore" not in st.session_state:
+        st.session_state.qa_vectorstore = None
+        st.session_state.qa_embed_time = 0
+
+    if (now - st.session_state.qa_embed_time) > 300 or st.session_state.qa_vectorstore is None:
+        docs = load_qa_memory_jsonl()
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL)
+        st.session_state.qa_vectorstore = FAISS.from_documents(docs, embeddings)
+        st.session_state.qa_embed_time = now
+        st.toast("🔁 QA memory re-embedded.")
+    return st.session_state.qa_vectorstore
+
+# === GitHub Correction Push ===
+def push_to_github(record):
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    get_res = requests.get(GITHUB_QA_FILE_URL, headers=headers)
+    if get_res.status_code != 200:
+        return False
+
+    sha = get_res.json()["sha"]
+    old_content = base64.b64decode(get_res.json()["content"]).decode("utf-8")
+    updated = old_content + json.dumps(record) + "\n"
+
+    payload = {
+        "message": f"Add correction: {record['query']}",
+        "content": base64.b64encode(updated.encode()).decode(),
+        "sha": sha
+    }
+    put_res = requests.put(GITHUB_QA_FILE_URL, headers=headers, json=payload)
+    return put_res.status_code in [200, 201]
+
+# === Vectorstore Initialization ===
 def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
     if "active_vectorstore" in st.session_state and st.session_state.get("vectorstore_hash") == file_hash:
         return st.session_state.active_vectorstore
@@ -281,6 +213,7 @@ def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
     processor = DocumentProcessor()
     pdf_docs = processor.process(pdf_path)
     grouped_pdf_docs = group_by_clause_with_notes(pdf_docs)
+
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     jsonl_split = splitter.split_documents(jsonl_chunks)
     pdf_split = splitter.split_documents(grouped_pdf_docs)
@@ -293,11 +226,43 @@ def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
     st.session_state.vectorstore_hash = file_hash
     return db
 
+# === UI and Query Logic ===
+st.sidebar.header("🔐 Login")
+if st.sidebar.text_input("Enter password", type="password") != "Password":
+    st.warning("🚫 Access denied")
+    st.stop()
+
+st.title("⚡ Clause-Smart Code Assistant")
+
+code_option = st.sidebar.selectbox("📘 Select Code Standard", ["None", "AS3000", "AS3017", "AS3003"])
+code_to_jsonl = {
+    "AS3000": "https://raw.githubusercontent.com/najam-rag/Deep2/main/as3000_chunks_by_clause.jsonl",
+    "AS3017": "https://raw.githubusercontent.com/YOUR_REPO/main/as3017_chunks.jsonl",
+    "AS3003": "https://raw.githubusercontent.com/YOUR_REPO/main/as3003_chunks.jsonl",
+}
+selected_jsonl_url = code_to_jsonl.get(code_option)
+
+uploaded_file = st.file_uploader("📌 Upload Your Code PDF", type="pdf")
+if not uploaded_file:
+    st.info("📌 Please upload a code PDF to begin.")
+    st.stop()
+
+with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+    tmp.write(uploaded_file.read())
+    tmp_path = tmp.name
+    file_hash = hashlib.md5(open(tmp_path, 'rb').read()).hexdigest()
+
+jsonl_chunks = load_jsonl_chunks_from_url(selected_jsonl_url) if selected_jsonl_url and code_option != "None" else []
+db = initialize_vectorstore_once(file_hash, tmp_path, jsonl_chunks)
+retriever = db.as_retriever()
+
+llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2, openai_api_key=OPENAI_API_KEY)
+qa = RetrievalQAWithSourcesChain.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+
+qa_vectorstore = get_qa_vectorstore()
+
 query = st.text_input("💬 Ask your question:")
 if query:
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics.pairwise import cosine_similarity
-
     def extract_keywords(text):
         return re.findall(r"[a-zA-Z]{3,}", text.lower())
 
@@ -305,20 +270,14 @@ if query:
         query_keywords = extract_keywords(query)
         if not query_keywords:
             return []
-    
         candidates = []
         for doc in qa_docs:
             q = doc.metadata.get("question", "").lower()
             score = sum(1 for word in query_keywords if word in q)
             if score > 0:
                 candidates.append((score, doc))
-    
         candidates.sort(reverse=True, key=lambda x: x[0])
         return [c[1] for c in candidates[:3]] if candidates else []
-
-    qa_docs_all = load_qa_memory_jsonl()
-    qa_docs = get_best_qa_match(query, qa_docs_all)
-    doc_docs = retriever.get_relevant_documents(query)
 
     def deduplicate_by_content(docs):
         seen = set()
@@ -330,6 +289,9 @@ if query:
                 unique_docs.append(d)
         return unique_docs
 
+    qa_docs_all = load_qa_memory_jsonl()
+    qa_docs = get_best_qa_match(query, qa_docs_all)
+    doc_docs = retriever.get_relevant_documents(query)
     merged_docs = deduplicate_by_content(qa_docs + doc_docs)
     result = qa.combine_documents_chain.run(input_documents=merged_docs, question=query)
 
