@@ -178,7 +178,7 @@ def initialize_vectorstore_once(file_hash, pdf_path, jsonl_chunks):
 
     processor = DocumentProcessor()
     pdf_docs = processor.process(pdf_path)
-    
+    grouped_pdf_docs = group_by_clause_with_notes(pdf_docs)
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     jsonl_split = splitter.split_documents(jsonl_chunks)
     pdf_split = splitter.split_documents(grouped_pdf_docs)
